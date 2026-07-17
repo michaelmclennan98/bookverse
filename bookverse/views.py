@@ -525,8 +525,6 @@ def render_sidebar(
         st.session_state.active_page = "Discover"
 
     active_page = str(st.session_state.active_page)
-    if st.session_state.get("sidebar_navigation") != active_page:
-        st.session_state.sidebar_navigation = active_page
 
     brand_col, title_col = st.sidebar.columns([1, 2.3])
     with brand_col:
