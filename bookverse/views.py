@@ -62,152 +62,456 @@ def apply_theme() -> None:
     st.markdown(
         """
         <style>
-        .stApp { background: linear-gradient(180deg, #111318 0%, #171a21 100%); }
-        [data-testid="stSidebar"] { background: #0d0f14; }
-        .block-container { max-width: 1480px; padding-top: 1.7rem; }
-        h1, h2, h3 { letter-spacing: -0.02em; }
-        .book-meta { color: #b6bdc9; font-size: 0.88rem; }
-        .book-title { font-weight: 750; line-height: 1.15; min-height: 2.3rem; }
-        .source-pill {
-            display: inline-block; border: 1px solid #3b4252; border-radius: 999px;
-            padding: 0.1rem 0.45rem; color: #cbd5e1; font-size: 0.72rem;
+        .stApp {
+            background: linear-gradient(180deg, #111318 0%, #171a21 100%);
+            overflow-x: hidden;
         }
+
+        /* Remove the Streamlit sidebar on desktop and mobile. */
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        button[data-testid="stSidebarCollapseButton"] {
+            display: none !important;
+        }
+
+        .block-container {
+            max-width: 1480px;
+            padding-top: 0.7rem;
+        }
+
+        h1, h2, h3 {
+            letter-spacing: -0.02em;
+        }
+
+        .book-meta {
+            color: #b6bdc9;
+            font-size: 0.88rem;
+        }
+
+        .book-title {
+            font-weight: 750;
+            line-height: 1.15;
+            min-height: 2.3rem;
+        }
+
+        .source-pill {
+            display: inline-block;
+            border: 1px solid #3b4252;
+            border-radius: 999px;
+            padding: 0.1rem 0.45rem;
+            color: #cbd5e1;
+            font-size: 0.72rem;
+        }
+
+        /* Main website-style navigation. */
+        .st-key-top_navigation {
+            position: sticky;
+            top: 2.85rem;
+            z-index: 999;
+            padding: 0.7rem 0.85rem 0.8rem;
+            margin-bottom: 1rem;
+            background: rgba(13, 15, 20, 0.98);
+            border: 1px solid #303642;
+            border-radius: 0 0 1rem 1rem;
+            box-shadow: 0 8px 22px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+        }
+
+        .st-key-top_navigation h3 {
+            margin: 0 !important;
+            padding: 0 !important;
+        }
+
+        .st-key-top_navigation p {
+            margin-bottom: 0 !important;
+        }
+
+        .st-key-top_navigation img {
+            object-fit: contain;
+        }
+
+        .st-key-top_navigation > div[data-testid="stVerticalBlock"] {
+            gap: 0.55rem;
+        }
+
+        .st-key-top_navigation [data-testid="stHorizontalBlock"] {
+            align-items: center;
+        }
+
+        .st-key-top_nav_links {
+            width: 100%;
+        }
+
+        .st-key-top_nav_links [data-testid="stHorizontalBlock"] {
+            display: flex !important;
+            flex-direction: row !important;
+            flex-wrap: nowrap !important;
+            gap: 0.5rem !important;
+            width: 100% !important;
+        }
+
+        .st-key-top_nav_links [data-testid="stColumn"] {
+            flex: 1 1 0 !important;
+            width: 25% !important;
+            min-width: 0 !important;
+        }
+
+        .st-key-top_nav_links .stButton {
+            width: 100%;
+        }
+
+        .st-key-top_nav_links .stButton > button {
+            width: 100%;
+            min-height: 45px;
+            border-radius: 0.7rem;
+            padding: 0.45rem 0.55rem;
+            white-space: nowrap;
+            font-weight: 700;
+        }
+
+        .st-key-top_nav_links .stButton > button p {
+            white-space: nowrap;
+        }
+
         .brand-loader {
-            display: flex; align-items: center; gap: 0.9rem; padding: 0.9rem 1rem;
-            border: 1px solid #303642; border-radius: 1rem; background: rgba(27, 33, 43, 0.95);
+            display: flex;
+            align-items: center;
+            gap: 0.9rem;
+            padding: 0.9rem 1rem;
+            border: 1px solid #303642;
+            border-radius: 1rem;
+            background: rgba(27, 33, 43, 0.95);
             margin: 0.6rem 0 1rem 0;
         }
-        .brand-loader img { width: 58px; height: 58px; object-fit: contain; animation: bob 1.8s ease-in-out infinite; }
-        .brand-loader .loader-title { font-size: 1rem; font-weight: 700; }
-        .brand-loader .loader-sub { color: #b6bdc9; font-size: 0.9rem; }
-        .brand-note { color: #b6bdc9; font-size: 0.95rem; }
-        @keyframes bob {
-            0% { transform: translateY(0px); }
-            50% { transform: translateY(-6px); }
-            100% { transform: translateY(0px); }
+
+        .brand-loader img {
+            width: 58px;
+            height: 58px;
+            object-fit: contain;
+            animation: bob 1.8s ease-in-out infinite;
         }
+
+        .brand-loader .loader-title {
+            font-size: 1rem;
+            font-weight: 700;
+        }
+
+        .brand-loader .loader-sub {
+            color: #b6bdc9;
+            font-size: 0.9rem;
+        }
+
+        .brand-note {
+            color: #b6bdc9;
+            font-size: 0.95rem;
+        }
+
+        @keyframes bob {
+            0% {
+                transform: translateY(0);
+            }
+
+            50% {
+                transform: translateY(-6px);
+            }
+
+            100% {
+                transform: translateY(0);
+            }
+        }
+
         .bookcase-frame {
-            padding: 1rem 1rem 0.2rem; border: 10px solid #5b321c; border-radius: 0.8rem;
-            background: radial-gradient(circle at 50% 5%, #3b2619 0%, #21140e 72%);
-            box-shadow: inset 0 0 0 3px #9a6035, inset 0 0 32px rgba(0,0,0,.72);
+            padding: 1rem 1rem 0.2rem;
+            border: 10px solid #5b321c;
+            border-radius: 0.8rem;
+            background: radial-gradient(
+                circle at 50% 5%,
+                #3b2619 0%,
+                #21140e 72%
+            );
+            box-shadow:
+                inset 0 0 0 3px #9a6035,
+                inset 0 0 32px rgba(0, 0, 0, 0.72);
             margin: 0.8rem 0 1.3rem;
         }
+
         .bookcase-nameplate {
-            width: fit-content; margin: -0.15rem auto 1rem; padding: .35rem .95rem;
-            border: 2px solid #c9954f; border-radius: .35rem; color: #f5deb3;
-            background: #4a2817; font-weight: 750; letter-spacing: .04em;
-            box-shadow: 0 2px 5px rgba(0,0,0,.5);
+            width: fit-content;
+            margin: -0.15rem auto 1rem;
+            padding: 0.35rem 0.95rem;
+            border: 2px solid #c9954f;
+            border-radius: 0.35rem;
+            color: #f5deb3;
+            background: #4a2817;
+            font-weight: 750;
+            letter-spacing: 0.04em;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
         }
+
         .bookcase-row {
-            position: relative; display: flex; align-items: flex-end; gap: 5px; min-height: 205px;
-            padding: 0 14px 19px; overflow-x: auto; overflow-y: hidden;
+            position: relative;
+            display: flex;
+            align-items: flex-end;
+            gap: 5px;
+            min-height: 205px;
+            padding: 0 14px 19px;
+            overflow-x: auto;
+            overflow-y: hidden;
             scrollbar-color: #7e4b2c #21140e;
         }
+
         .bookcase-row::after {
-            content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 18px;
-            border-top: 3px solid #c07b42; border-bottom: 4px solid #3f2112;
-            background: linear-gradient(180deg, #9a5b31 0%, #65371f 55%, #3f2112 100%);
-            box-shadow: 0 7px 12px rgba(0,0,0,.65), inset 0 2px 2px rgba(255,255,255,.16);
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            height: 18px;
+            border-top: 3px solid #c07b42;
+            border-bottom: 4px solid #3f2112;
+            background: linear-gradient(
+                180deg,
+                #9a5b31 0%,
+                #65371f 55%,
+                #3f2112 100%
+            );
+            box-shadow:
+                0 7px 12px rgba(0, 0, 0, 0.65),
+                inset 0 2px 2px rgba(255, 255, 255, 0.16);
             z-index: 1;
         }
+
         .book-spine {
-            --spine: #234c78; --spine-dark: #10283f;
-            position: relative; z-index: 2; flex: 0 0 auto; display: flex; align-items: center;
-            justify-content: center; height: var(--book-height, 176px); width: var(--book-width, 42px);
-            padding: 7px 5px; border: 1px solid rgba(255,255,255,.18); border-radius: 4px 4px 2px 2px;
-            background: linear-gradient(90deg, var(--spine-dark) 0%, var(--spine) 14%, var(--spine) 82%, var(--spine-dark) 100%);
-            color: #fff8df !important; text-decoration: none !important; text-shadow: 0 1px 2px rgba(0,0,0,.9);
-            box-shadow: inset 2px 0 rgba(255,255,255,.12), inset -2px 0 rgba(0,0,0,.32), 2px 2px 5px rgba(0,0,0,.55);
-            transition: transform .16s ease, filter .16s ease;
+            --spine: #234c78;
+            --spine-dark: #10283f;
+            position: relative;
+            z-index: 2;
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: var(--book-height, 176px);
+            width: var(--book-width, 42px);
+            padding: 7px 5px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 4px 4px 2px 2px;
+            background: linear-gradient(
+                90deg,
+                var(--spine-dark) 0%,
+                var(--spine) 14%,
+                var(--spine) 82%,
+                var(--spine-dark) 100%
+            );
+            color: #fff8df !important;
+            text-decoration: none !important;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+            box-shadow:
+                inset 2px 0 rgba(255, 255, 255, 0.12),
+                inset -2px 0 rgba(0, 0, 0, 0.32),
+                2px 2px 5px rgba(0, 0, 0, 0.55);
+            transition: transform 0.16s ease, filter 0.16s ease;
         }
-        .book-spine:hover, .book-spine:focus {
-            transform: translateY(-10px) rotate(-1deg); filter: brightness(1.18); z-index: 4; outline: 2px solid #e2ad57;
+
+        .book-spine:hover,
+        .book-spine:focus {
+            transform: translateY(-10px) rotate(-1deg);
+            filter: brightness(1.18);
+            z-index: 4;
+            outline: 2px solid #e2ad57;
         }
+
         .book-spine-title {
-            writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; overflow: hidden;
-            text-overflow: ellipsis; max-height: calc(var(--book-height, 176px) - 22px);
-            font-size: .78rem; font-weight: 750; letter-spacing: .015em;
+            writing-mode: vertical-rl;
+            transform: rotate(180deg);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-height: calc(var(--book-height, 176px) - 22px);
+            font-size: 0.78rem;
+            font-weight: 750;
+            letter-spacing: 0.015em;
         }
-        .book-spine::before, .book-spine::after {
-            content: ""; position: absolute; left: 4px; right: 4px; height: 2px; background: rgba(255,229,160,.65);
+
+        .book-spine::before,
+        .book-spine::after {
+            content: "";
+            position: absolute;
+            left: 4px;
+            right: 4px;
+            height: 2px;
+            background: rgba(255, 229, 160, 0.65);
         }
-        .book-spine::before { top: 9px; }
-        .book-spine::after { bottom: 9px; }
+
+        .book-spine::before {
+            top: 9px;
+        }
+
+        .book-spine::after {
+            bottom: 9px;
+        }
+
         .bookcase-shelf-label {
-            position: absolute; z-index: 3; right: 10px; bottom: 2px; font-size: .68rem; color: #f0d3a0;
-            background: #4b2917; border: 1px solid #bb7a41; border-radius: .25rem; padding: 1px 7px;
+            position: absolute;
+            z-index: 3;
+            right: 10px;
+            bottom: 2px;
+            font-size: 0.68rem;
+            color: #f0d3a0;
+            background: #4b2917;
+            border: 1px solid #bb7a41;
+            border-radius: 0.25rem;
+            padding: 1px 7px;
         }
-        .bookcase-empty-space { color: #c9b79f; padding: 4.5rem 1rem 5.5rem; text-align: center; }
-        .st-key-phone_controls_toggle { margin-bottom: .25rem; }
-        .st-key-phone_controls_panel {
-            padding: .85rem 1rem; border: 1px solid #39414e; border-left: 5px solid #d8a657;
-            border-radius: 1rem; background: rgba(30, 34, 43, .96); margin-bottom: 1rem;
+
+        .bookcase-empty-space {
+            color: #c9b79f;
+            padding: 4.5rem 1rem 5.5rem;
+            text-align: center;
         }
-        div[data-testid="stMetric"] { background: #1e222b; border: 1px solid #303642; padding: 0.8rem; border-radius: 0.8rem; }
+
+        div[data-testid="stMetric"] {
+            background: #1e222b;
+            border: 1px solid #303642;
+            padding: 0.8rem;
+            border-radius: 0.8rem;
+        }
 
         @media (max-width: 768px) {
-            [data-testid="stSidebar"],
-            [data-testid="stSidebarCollapsedControl"],
-            button[data-testid="stSidebarCollapseButton"] {
-                display: none !important;
-            }
-
-            .stApp { overflow-x: hidden; }
             .block-container {
                 max-width: 100% !important;
-                padding: .65rem .7rem calc(1.4rem + env(safe-area-inset-bottom)) !important;
+                padding:
+                    0
+                    0.65rem
+                    calc(1.4rem + env(safe-area-inset-bottom))
+                    !important;
             }
 
-            .st-key-phone_controls_toggle {
-                position: sticky;
-                top: calc(3.75rem + env(safe-area-inset-top));
-                z-index: 950;
-                margin: 3.6rem 0 .7rem;
-                padding: .55rem .75rem;
-                background: rgba(13, 15, 20, .98);
-                border: 1px solid #303642;
-                border-radius: .85rem;
-                backdrop-filter: blur(14px);
-            }
-            .st-key-phone_controls_toggle label { min-height: 44px; }
-            .st-key-phone_controls_panel {
-                padding: .8rem !important; margin-inline: -.1rem;
-                border-radius: .85rem;
-            }
-            .st-key-phone_controls_panel [data-testid="stHorizontalBlock"] {
-                gap: .5rem !important;
+            .st-key-top_navigation {
+                top: calc(2.8rem + env(safe-area-inset-top));
+                margin-inline: -0.65rem;
+                padding: 0.55rem 0.55rem 0.65rem;
+                margin-bottom: 0.8rem;
+                border-radius: 0 0 0.85rem 0.85rem;
             }
 
-            /* Make all important controls finger-friendly. */
-            .stButton > button, .stFormSubmitButton > button,
-            [data-testid="stLinkButton"] > a { min-height: 46px; }
-            div[data-baseweb="select"] > div, input, textarea { min-height: 46px; }
-            [data-testid="stCheckbox"] label { min-height: 42px; padding-block: .25rem; }
+            .st-key-top_navigation > div[data-testid="stVerticalBlock"] {
+                gap: 0.4rem;
+            }
 
-            /* Stack search and action layouts cleanly on a narrow screen. */
-            h1 { font-size: 1.75rem !important; }
-            h2 { font-size: 1.4rem !important; }
-            .brand-loader { align-items: flex-start; }
-            .brand-loader img { width: 46px; height: 46px; }
+            .st-key-top_navigation [data-testid="stHorizontalBlock"] {
+                flex-wrap: nowrap !important;
+                gap: 0.35rem !important;
+            }
 
-            /* Keep the 15-book shelf intact and make it swipe horizontally. */
+            .st-key-top_navigation [data-testid="stColumn"] {
+                min-width: 0 !important;
+            }
+
+            .st-key-top_navigation img {
+                max-width: 39px !important;
+            }
+
+            .st-key-top_navigation h3 {
+                font-size: 1rem !important;
+                line-height: 1.05 !important;
+            }
+
+            .st-key-top_navigation p {
+                font-size: 0.68rem !important;
+                line-height: 1.15 !important;
+            }
+
+            .st-key-top_navigation .stButton > button {
+                min-height: 40px;
+                padding: 0.3rem 0.35rem;
+                font-size: 0.72rem;
+            }
+
+            .st-key-top_nav_links [data-testid="stHorizontalBlock"] {
+                gap: 0.3rem !important;
+            }
+
+            .st-key-top_nav_links .stButton > button {
+                min-height: 43px;
+                padding: 0.3rem 0.15rem;
+                border-radius: 0.55rem;
+            }
+
+            .st-key-top_nav_links .stButton > button p {
+                white-space: normal !important;
+                font-size: 0.69rem !important;
+                line-height: 1.05 !important;
+            }
+
+            /* Make important controls finger-friendly. */
+            .stButton > button,
+            .stFormSubmitButton > button,
+            [data-testid="stLinkButton"] > a {
+                min-height: 46px;
+            }
+
+            div[data-baseweb="select"] > div,
+            input,
+            textarea {
+                min-height: 46px;
+            }
+
+            [data-testid="stCheckbox"] label {
+                min-height: 42px;
+                padding-block: 0.25rem;
+            }
+
+            h1 {
+                font-size: 1.75rem !important;
+            }
+
+            h2 {
+                font-size: 1.4rem !important;
+            }
+
+            .brand-loader {
+                align-items: flex-start;
+            }
+
+            .brand-loader img {
+                width: 46px;
+                height: 46px;
+            }
+
+            /* Keep the 15-book shelf intact and swipe horizontally. */
             [class*="st-key-live_shelf_row_"] {
-                overflow-x: auto !important; overflow-y: visible !important;
+                overflow-x: auto !important;
+                overflow-y: visible !important;
                 -webkit-overflow-scrolling: touch;
                 padding-bottom: 28px !important;
             }
-            [class*="st-key-live_shelf_row_"] > div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"],
-            [class*="st-key-live_shelf_row_"] div[data-testid="stHorizontalBlock"] {
-                min-width: 1020px !important; flex-wrap: nowrap !important;
+
+            [class*="st-key-live_shelf_row_"]
+            > div[data-testid="stVerticalBlock"]
+            > div[data-testid="stHorizontalBlock"],
+            [class*="st-key-live_shelf_row_"]
+            div[data-testid="stHorizontalBlock"] {
+                min-width: 1020px !important;
+                flex-wrap: nowrap !important;
             }
+
             .st-key-live_bookcase_frame {
-                margin-inline: -.35rem !important; padding-inline: .45rem !important;
+                margin-inline: -0.35rem !important;
+                padding-inline: 0.45rem !important;
                 border-width: 6px !important;
             }
 
-            /* Dialogs and book information use the full phone width. */
-            [data-testid="stDialog"] > div { width: calc(100vw - 1rem) !important; max-width: none !important; }
-            [data-testid="stDialog"] [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
+            /* Dialogs and book information use the phone width. */
+            [data-testid="stDialog"] > div {
+                width: calc(100vw - 1rem) !important;
+                max-width: none !important;
+            }
+
+            [data-testid="stDialog"]
+            [data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+            }
         }
         </style>
         """,
@@ -490,21 +794,39 @@ def render_profile_gate(db: LibraryDatabase, settings: Settings) -> dict[str, An
 
 
 def _set_active_page(page: str) -> None:
-    """Queue a confirmed navigation choice without changing the browser URL."""
+    """Set the current BookVerse page without changing the browser URL."""
     if page not in NAVIGATION_PAGES:
         page = "Discover"
+
     st.session_state.active_page = page
-    st.session_state.phone_active_page = page
-    # The desktop radio may already be instantiated in this run. Queue its
-    # widget-state update for the next rerun instead of mutating it immediately.
-    st.session_state.pending_sidebar_navigation = page
 
 
 def _lock_active_profile(db: LibraryDatabase) -> None:
     st.session_state.pop("active_profile_id", None)
+    st.session_state.pop("active_page", None)
+
+    # Remove state left behind by the old sidebar and phone menu.
+    for legacy_key in (
+        "sidebar_navigation",
+        "pending_sidebar_navigation",
+        "phone_active_page",
+        "show_phone_controls",
+        "mobile_page_selector",
+        "mobile_profile_selector",
+    ):
+        st.session_state.pop(legacy_key, None)
+
     for key in list(st.session_state):
-        if key.startswith(("search_", "similar_", "personalised_", "phone_")):
+        if key.startswith(
+            (
+                "search_",
+                "similar_",
+                "personalised_",
+                "phone_",
+            )
+        ):
             st.session_state.pop(key, None)
+
     db.set_active_user(None)
 
 
@@ -513,114 +835,93 @@ def render_sidebar(
     db: LibraryDatabase,
     profile: dict[str, Any],
 ) -> tuple[str, str]:
-    pending_page = st.session_state.pop("pending_sidebar_navigation", None)
-    if pending_page in NAVIGATION_PAGES:
-        # This runs before the radio widget is created, so Streamlit permits the
-        # state synchronisation. It mirrors the proven staged phone-nav pattern.
-        st.session_state.sidebar_navigation = pending_page
-        st.session_state.active_page = pending_page
-        st.session_state.phone_active_page = pending_page
+    """
+    Render BookVerse's website-style top navigation.
 
+    The function keeps its original name so app.py does not need
+    another change.
+    """
     if st.session_state.get("active_page") not in NAVIGATION_PAGES:
         st.session_state.active_page = "Discover"
 
     active_page = str(st.session_state.active_page)
-
-    brand_col, title_col = st.sidebar.columns([1, 2.3])
-    with brand_col:
-        st.image(str(LOGO_ICON_PATH), width=56)
-    with title_col:
-        st.markdown("## BookVerse")
-        st.caption(f"{profile['display_name']} · @{profile['username']}")
-
-    desktop_page = st.sidebar.radio(
-        "Navigate",
-        NAVIGATION_PAGES,
-        key="sidebar_navigation",
-        label_visibility="collapsed",
-    )
-    if desktop_page != active_page:
-        _set_active_page(desktop_page)
-        active_page = desktop_page
-
-    if st.sidebar.button("🔒 Lock / switch profile", use_container_width=True):
-        _lock_active_profile(db)
-        st.rerun()
-
-    st.sidebar.divider()
-    st.sidebar.caption("Catalogue connections")
     api_key = settings.google_books_api_key
-    if api_key:
-        st.sidebar.success("Google Books enabled", icon="✅")
-    else:
-        st.sidebar.info("Using Open Library only", icon="ℹ️")
     saved_count = len(db.list_entries("All"))
-    st.sidebar.caption(f"Your library: **{saved_count} books**")
-    st.sidebar.caption(f"Local database: `{settings.database_path}`")
-    st.sidebar.caption("Profiles are protected with a local PIN. Add hosted authentication before public deployment.")
 
-    # Phone fallback controls modelled on the user's Frog dashboard. The toggle
-    # survives Streamlit reruns. Dropdown changes are staged and only applied
-    # after pressing Go, so choosing an option cannot unexpectedly navigate.
-    if "show_phone_controls" not in st.session_state:
-        st.session_state.show_phone_controls = False
-    if st.session_state.get("phone_active_page") not in NAVIGATION_PAGES:
-        st.session_state.phone_active_page = active_page
-    if st.session_state.get("mobile_page_selector") not in NAVIGATION_PAGES:
-        st.session_state.mobile_page_selector = str(st.session_state.phone_active_page)
+    catalogue_status = (
+        "Google Books + Open Library"
+        if api_key
+        else "Open Library"
+    )
 
-    with st.container(key="phone_controls_toggle"):
-        st.checkbox(
-            "📱 Show phone controls",
-            key="show_phone_controls",
-            help="Turn this on when the Streamlit sidebar is hidden on your phone. It stays open across reruns.",
+    navigation_items = (
+        ("Discover", "🔎 Discover"),
+        ("My Library", "📚 Library"),
+        ("Reading Stats", "📊 Stats"),
+        ("Settings & About", "⚙️ Settings"),
+    )
+
+    with st.container(key="top_navigation"):
+        identity_col, switch_col = st.columns(
+            [5, 1.35],
+            vertical_alignment="center",
         )
 
-    if bool(st.session_state.get("show_phone_controls", False)):
-        with st.container(key="phone_controls_panel"):
-            st.markdown("#### 📱 Phone controls")
-            st.caption("Choose the page, then press Go. Selecting an option does not navigate by itself.")
-            profile_col, page_col = st.columns([1, 1])
-            with profile_col:
-                profile_action = st.selectbox(
-                    "Profile",
-                    (f"{profile['display_name']} (@{profile['username']})", "🔒 Lock / switch profile"),
-                    key="mobile_profile_selector",
-                    help="Choose Lock / switch profile and press Go to return to the PIN screen.",
-                )
-            with page_col:
-                staged_page = st.selectbox(
-                    "Navigate",
-                    NAVIGATION_PAGES,
-                    key="mobile_page_selector",
-                    help="This page is staged until you press Go.",
+        with identity_col:
+            logo_col, title_col = st.columns(
+                [0.52, 4.48],
+                vertical_alignment="center",
+            )
+
+            with logo_col:
+                st.image(
+                    str(LOGO_ICON_PATH),
+                    width=48,
                 )
 
-            go_col, status_col = st.columns([1, 2.4], vertical_alignment="center")
-            with go_col:
-                go_pressed = st.button(
-                    "Go",
-                    key="mobile_go_button",
-                    type="primary",
-                    use_container_width=True,
-                )
-            with status_col:
+            with title_col:
+                st.markdown("### BookVerse")
                 st.caption(
-                    f"Current page: **{st.session_state.phone_active_page}** · "
-                    f"Library: **{saved_count} books**"
+                    f"{profile['display_name']} · "
+                    f"@{profile['username']} · "
+                    f"{saved_count} books · "
+                    f"{catalogue_status}"
                 )
 
-            if go_pressed:
-                if profile_action == "🔒 Lock / switch profile":
-                    _lock_active_profile(db)
-                    st.rerun()
-                _set_active_page(staged_page)
+        with switch_col:
+            if st.button(
+                "🔒 Switch",
+                key="top_switch_profile",
+                help="Lock this profile or switch to another reader.",
+                use_container_width=True,
+            ):
+                _lock_active_profile(db)
                 st.rerun()
 
-            if api_key:
-                st.success("Google Books enabled", icon="✅")
-            else:
-                st.info("Using Open Library only", icon="ℹ️")
+        with st.container(key="top_nav_links"):
+            nav_columns = st.columns(
+                len(navigation_items),
+                gap="small",
+            )
+
+            for column, (page_name, button_label) in zip(
+                nav_columns,
+                navigation_items,
+            ):
+                with column:
+                    if st.button(
+                        button_label,
+                        key=f"top_navigation_{page_name}",
+                        type=(
+                            "primary"
+                            if page_name == active_page
+                            else "secondary"
+                        ),
+                        use_container_width=True,
+                    ):
+                        if page_name != active_page:
+                            _set_active_page(page_name)
+                            st.rerun()
 
     return str(st.session_state.active_page), api_key
 
