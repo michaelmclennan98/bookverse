@@ -6,7 +6,7 @@ from pathlib import Path
 import streamlit as st
 
 from bookverse.config import get_settings
-from bookverse.database import LibraryDatabase
+from bookverse.cloud_database import CloudLibraryDatabase
 from bookverse.views import (
     apply_theme,
     render_discover,
@@ -32,7 +32,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 apply_theme()
-database = LibraryDatabase(settings.database_path)
+database = CloudLibraryDatabase(settings.database_path)
+
+if database.cloud_error:
+    st.error(
+        "Cloud saving is not connected. Check the Supabase bucket "
+        "and the Streamlit Secrets settings."
+    )
+
 profile = render_profile_gate(database, settings)
 database.set_active_user(int(profile["id"]))
 page, google_api_key = render_sidebar(settings, database, profile)
