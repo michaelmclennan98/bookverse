@@ -18,6 +18,7 @@ from .cache import (
     cached_search,
     cached_similar,
 )
+from .bulk_import import render_bulk_importer
 from .config import Settings, get_settings
 from .database import DEFAULT_SHELVES, LibraryDatabase
 from .models import Book
@@ -822,6 +823,7 @@ def _lock_active_profile(db: LibraryDatabase) -> None:
                 "search_",
                 "similar_",
                 "personalised_",
+                "bulk_",
                 "phone_",
             )
         ):
@@ -1745,6 +1747,8 @@ def render_library(db: LibraryDatabase) -> None:
         "Click a book spine to open it inside this BookVerse session. "
         "No new page is loaded, so your unlocked profile stays active."
     )
+
+    render_bulk_importer(db)
 
     entries_all = db.list_entries("All")
     shelves = ["All", *db.shelves()]
