@@ -13,6 +13,7 @@ from urllib.parse import quote
 import requests
 
 from .database import LibraryDatabase
+from .models import Book
 
 
 LOGGER = logging.getLogger(__name__)
@@ -372,6 +373,50 @@ class CloudLibraryDatabase(LibraryDatabase):
 
         self._upload_safely()
         return count
+
+    def save_entries_bulk(
+        self,
+        entries: list[tuple[Book, str]],
+    ) -> int:
+        """
+        Save several books while uploading only one final
+        SQLite snapshot to Supabase.
+        """
+        unique_entries: list[tuple[Book, str]] = []
+        seen_uids: set[str] = set()
+
+        for book, shelf in entries:
+            if book.uid in seen_uids:
+                continue
+
+            seen_uids.add(book.uid)
+            unique_entries.append((book, shelf))
+
+        if not unique_entries:
+            return 0
+
+        saved_count = 0
+        self._suppress_cloud_upload += 1
+
+        try:
+            for book, shelf in unique_entries:
+                super().save_entry(
+                    book,
+                    shelf,
+                    progress_pages=(
+                        int(book.page_count or 0)
+                        if shelf == "Finished"
+                        else 0
+                    ),
+                )
+                saved_count += 1
+        finally:
+            self._suppress_cloud_upload -= 1
+
+            if saved_count:
+                self._upload_safely()
+
+        return saved_count
 
     @property
     def cloud_enabled(self) -> bool:
