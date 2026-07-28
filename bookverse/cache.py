@@ -6,9 +6,18 @@ from typing import Any
 
 import streamlit as st
 
-from .api_clients import BookSearchService, merge_book_records
+from .api_clients import BookSearchService, RequestBudget, merge_book_records
 from .models import Book
 from .persistent_cache import get_cached, set_cached
+from .recommendation_intelligence import (
+    book_dna,
+    feedback_adjustment,
+    final_match_percent,
+    normalise_rules,
+    rule_rejections,
+    score_breakdown,
+    select_diverse_records,
+)
 from .recommender import rank_similar_detailed, rank_smart_results
 from .smart_search import parse_smart_query
 
@@ -234,16 +243,18 @@ def cached_personalised(
     open_library_contact: str,
     timeout: int,
     limit: int = 18,
-    engine_version: str = "v20-parallel-persistent",
+    engine_version: str = "v21-recommendation-intelligence",
     refresh_token: int = 0,
     scan_mode: str = "Fast",
     database_path: str = "",
     feedback_payload: list[dict] | None = None,
+    rules_payload: dict[str, Any] | None = None,
 ) -> tuple[list[dict], list[str]]:
     mode = "Deep" if str(scan_mode).casefold() == "deep" else "Fast"
     seed_limit = 5 if mode == "Deep" else 3
     final_limit = max(6, min(int(limit), 30 if mode == "Deep" else 18))
     feedback_payload = list(feedback_payload or [])
+    rules = normalise_rules(rules_payload)
     parts = (
         profile_payload,
         entry_payloads,
@@ -251,6 +262,7 @@ def cached_personalised(
         refresh_token,
         mode,
         feedback_payload,
+        rules,
         engine_version,
     )
     cached = get_cached(database_path, "personalised", *parts)
@@ -266,7 +278,9 @@ def cached_personalised(
     negative_uids = {
         str(item.get("uid"))
         for item in feedback_payload
-        if str(item.get("feedback")) in {"Not interested", "Hide this book", "Already read another edition"}
+        if str(item.get("feedback")) in {
+            "Not interested", "Hide this book", "Already read another edition"
+        }
     }
     negative_identities = {
         f"{_normalise(str(item.get('title') or ''))}|{_normalise(str(item.get('author') or ''))}"
@@ -287,38 +301,38 @@ def cached_personalised(
     preference_signals = {
         str(item.get("feedback"))
         for item in feedback_payload
-        if str(item.get("feedback")) in {"Less romance", "More intense", "Lighter read"}
+        if str(item.get("feedback")) in {
+            "Less romance", "More intense", "Lighter read", "Too much romance",
+            "Not dark enough", "Too extreme", "Too long", "Too short",
+            "Too old", "Wrong genre",
+        }
     }
 
-    def preference_multiplier(book: Book) -> float:
-        text = _normalise(
-            " ".join(
-                [
-                    book.title,
-                    book.subtitle,
-                    book.description,
-                    " ".join(book.categories),
-                ]
-            )
-        )
-        multiplier = 1.0
-        romance_terms = ("romance", "romantic", "love story", "relationship")
-        intense_terms = ("horror", "thriller", "dark", "violent", "gore", "extreme", "psychological")
-        light_terms = ("cosy", "cozy", "uplifting", "humour", "humor", "feel good", "gentle", "comedy")
-        if "Less romance" in preference_signals and any(term in text for term in romance_terms):
-            multiplier -= 0.22
-        if "More intense" in preference_signals:
-            multiplier += 0.18 if any(term in text for term in intense_terms) else -0.05
-        if "Lighter read" in preference_signals:
-            if any(term in text for term in light_terms):
-                multiplier += 0.18
-            if any(term in text for term in intense_terms):
-                multiplier -= 0.16
-        return max(0.45, multiplier)
+    # One shared budget applies to every worker in the scan. The provider clients
+    # refuse further requests once the cap is reached and rank what is already held.
+    request_budget = RequestBudget(
+        max_google=18 if mode == "Deep" else 10,
+        max_openlibrary=7 if mode == "Deep" else 3,
+    )
+
+    scan_stats: dict[str, int] = {
+        "candidate_rows": 0,
+        "saved_or_duplicate_removed": 0,
+        "feedback_removed": 0,
+        "hidden_author_removed": 0,
+        "rule_filtered": 0,
+        "weak_match_removed": 0,
+        "aggregate_candidates": 0,
+    }
 
     def scan_seed(item: tuple[float, Book]) -> tuple[float, Book, list[Any], list[str]]:
         weight, seed = item
-        service = BookSearchService(google_api_key, open_library_contact, timeout)
+        service = BookSearchService(
+            google_api_key,
+            open_library_contact,
+            timeout,
+            request_budget=request_budget,
+        )
         try:
             enriched_seed = service.prepare_recommendation_seed(seed, scan_mode=mode)
         except TypeError:
@@ -332,30 +346,29 @@ def cached_personalised(
         except TypeError:
             response = service.recommendation_candidates(
                 enriched_seed,
-                max_results=145 if mode == "Deep" else 75,
+                max_results=90 if mode == "Deep" else 55,
             )
         try:
             candidates = service.enrich_recommendation_candidates(
                 enriched_seed,
                 response.books,
-                limit=5 if mode == "Deep" else 2,
+                limit=4 if mode == "Deep" else 1,
                 parallel=True,
             )
         except TypeError:
             candidates = service.enrich_recommendation_candidates(
                 enriched_seed,
                 response.books,
-                limit=12 if mode == "Deep" else 5,
+                limit=4 if mode == "Deep" else 1,
             )
         ranked = rank_similar_detailed(
             enriched_seed,
             candidates,
-            limit=10 if mode == "Deep" else 8,
+            limit=11 if mode == "Deep" else 8,
         )
         return weight, seed, ranked, response.provider_messages
 
     aggregates: dict[str, dict[str, Any]] = {}
-    seed_buckets: list[list[str]] = []
     messages: list[str] = []
 
     workers = min(3 if mode == "Deep" else 2, len(weighted_seeds))
@@ -368,21 +381,28 @@ def cached_personalised(
                 messages.append(f"One recommendation seed could not be scanned: {exc}")
                 continue
             messages.extend(provider_messages)
-            bucket: list[str] = []
             for result in ranked:
+                scan_stats["candidate_rows"] += 1
                 if float(result.score) < 0.13 or int(result.match_percent) < 58:
+                    scan_stats["weak_match_removed"] += 1
                     continue
                 book = result.book
-                if (
-                    book.uid in saved_uids
-                    or book.uid in negative_uids
-                    or _identity(book) in saved_identities
-                    or _identity(book) in negative_identities
-                ):
+                identity = _identity(book)
+                if book.uid in saved_uids or identity in saved_identities:
+                    scan_stats["saved_or_duplicate_removed"] += 1
+                    continue
+                if book.uid in negative_uids or identity in negative_identities:
+                    scan_stats["feedback_removed"] += 1
                     continue
                 author_key = _normalise(book.author_text)
                 if author_key and author_key in hidden_authors:
+                    scan_stats["hidden_author_removed"] += 1
                     continue
+                rejections = rule_rejections(book, rules)
+                if rejections:
+                    scan_stats["rule_filtered"] += 1
+                    continue
+
                 record = aggregates.setdefault(
                     book.uid,
                     {
@@ -392,37 +412,50 @@ def cached_personalised(
                         "best_label": "Possible match",
                         "reasons": [],
                         "seed_count": 0,
+                        "preference_points": 0.0,
                     },
                 )
                 multiplier = 1.0 + min(seed_weight, 12.0) * 0.08
                 if author_key and author_key in liked_authors:
                     multiplier += 0.18
-                multiplier *= preference_multiplier(book)
+                    record["preference_points"] += 4.0
+                feedback_multiplier, feedback_notes = feedback_adjustment(book, preference_signals)
+                multiplier *= feedback_multiplier
+                record["preference_points"] += (feedback_multiplier - 1.0) * 20.0
                 record["score"] += float(result.score) * multiplier
                 record["seed_count"] += 1
                 if int(result.match_percent) > int(record["best_percent"]):
                     record["best_percent"] = int(result.match_percent)
                     record["best_label"] = str(result.match_label)
-                for reason in [f"because you liked {seed.display_title}", *list(result.reasons)]:
+                for reason in [
+                    f"because you liked {seed.display_title}",
+                    *list(result.reasons),
+                    *feedback_notes,
+                ]:
                     if reason and reason not in record["reasons"]:
                         record["reasons"].append(reason)
-                if book.uid not in bucket:
-                    bucket.append(book.uid)
-            if bucket:
-                shift = (max(0, int(refresh_token)) * 2) % len(bucket) if refresh_token else 0
-                seed_buckets.append(bucket[shift:] + bucket[:shift])
 
-    # Niche searches fill genuine gaps, but Fast mode keeps them tightly bounded.
-    niches = [str(value).strip() for value in profile_payload.get("favourite_niches") or [] if str(value).strip()]
-    niche_limit = 3 if mode == "Deep" else 1
+    # A small profile-niche fallback runs only when seed scans did not produce a
+    # healthy pool. Every niche result must still prove a match to a real seed.
+    niches = [
+        str(value).strip()
+        for value in profile_payload.get("favourite_niches") or []
+        if str(value).strip()
+    ]
+    niche_limit = 2 if mode == "Deep" else 1
 
     def scan_niche(niche: str) -> tuple[str, list[Book], list[str]]:
-        service = BookSearchService(google_api_key, open_library_contact, timeout)
+        service = BookSearchService(
+            google_api_key,
+            open_library_contact,
+            timeout,
+            request_budget=request_budget,
+        )
         response = service.search(
             query=niche,
             mode="Genre / subject",
             provider="Auto",
-            max_results=20 if mode == "Deep" else 15,
+            max_results=18 if mode == "Deep" else 12,
             language="en",
             order_by="relevance",
             ebook_filter="",
@@ -440,15 +473,22 @@ def cached_personalised(
                     continue
                 messages.extend(provider_messages)
                 for book in books:
-                    if book.uid in saved_uids or book.uid in negative_uids or _identity(book) in saved_identities:
+                    scan_stats["candidate_rows"] += 1
+                    identity = _identity(book)
+                    if book.uid in saved_uids or identity in saved_identities:
+                        scan_stats["saved_or_duplicate_removed"] += 1
+                        continue
+                    if book.uid in negative_uids or identity in negative_identities:
+                        scan_stats["feedback_removed"] += 1
                         continue
                     author_key = _normalise(book.author_text)
                     if author_key and author_key in hidden_authors:
+                        scan_stats["hidden_author_removed"] += 1
+                        continue
+                    if rule_rejections(book, rules):
+                        scan_stats["rule_filtered"] += 1
                         continue
 
-                    # Niche-search results must still prove a real match to at least
-                    # one strong saved book. This blocks textbooks, grammar manuals
-                    # and other keyword-only false positives from entering the set.
                     best_result = None
                     for _seed_weight, seed_book in weighted_seeds:
                         ranked_one = rank_similar_detailed(seed_book, [book], limit=1)
@@ -458,6 +498,7 @@ def cached_personalised(
                         ):
                             best_result = ranked_one[0]
                     if best_result is None or float(best_result.score) < 0.13 or int(best_result.match_percent) < 58:
+                        scan_stats["weak_match_removed"] += 1
                         continue
 
                     record = aggregates.setdefault(
@@ -469,66 +510,88 @@ def cached_personalised(
                             "best_label": str(best_result.match_label),
                             "reasons": [],
                             "seed_count": 0,
+                            "preference_points": 0.0,
                         },
                     )
-                    multiplier = preference_multiplier(book)
+                    multiplier, feedback_notes = feedback_adjustment(book, preference_signals)
                     if author_key in liked_authors:
                         multiplier += 0.15
+                        record["preference_points"] += 3.0
+                    record["preference_points"] += (multiplier - 1.0) * 20.0
                     record["score"] += float(best_result.score) * multiplier
                     record["seed_count"] += 1
                     record["best_percent"] = max(int(record["best_percent"]), int(best_result.match_percent))
-                    for reason in [f"matches your {niche} preference", *list(best_result.reasons)]:
+                    for reason in [
+                        f"matches your {niche} preference",
+                        *list(best_result.reasons),
+                        *feedback_notes,
+                    ]:
                         if reason and reason not in record["reasons"]:
                             record["reasons"].append(reason)
 
-    # Rank the completed aggregate globally so the first page contains the
-    # strongest evidence, rather than one weak result from every seed. Keep a small
-    # author cap to preserve variety.
-    ranked_uids = sorted(
-        aggregates,
-        key=lambda uid: (
-            int(aggregates[uid]["best_percent"]),
-            int(aggregates[uid]["seed_count"]),
-            float(aggregates[uid]["score"]),
-            int(bool(aggregates[uid]["book"].description)),
-            int(aggregates[uid]["book"].ratings_count or 0),
-        ),
-        reverse=True,
-    )
-    ordered_uids: list[str] = []
-    author_counts: dict[str, int] = {}
-    for uid in ranked_uids:
-        book = aggregates[uid]["book"]
-        author_key = _normalise(book.author_text) or uid
-        if author_counts.get(author_key, 0) >= 2:
-            continue
-        author_counts[author_key] = author_counts.get(author_key, 0) + 1
-        ordered_uids.append(uid)
-        if len(ordered_uids) >= final_limit:
-            break
+    scan_stats["aggregate_candidates"] = len(aggregates)
+    ranked_records = list(aggregates.values())
+    for record in ranked_records:
+        book = record["book"]
+        record["rank_score"] = (
+            int(record["best_percent"]) * 2.0
+            + int(record["seed_count"]) * 12.0
+            + float(record["score"]) * 18.0
+            + (8.0 if book.description else 0.0)
+            + min(int(book.ratings_count or 0), 1000) / 250.0
+        )
+    ranked_records.sort(key=lambda record: float(record["rank_score"]), reverse=True)
+    if ranked_records and refresh_token:
+        bucket = ranked_records
+        shift = (max(0, int(refresh_token)) * 2) % len(bucket)
+        ranked_records = bucket[shift:] + bucket[:shift]
+    selected_records, diversity_stats = select_diverse_records(ranked_records, final_limit, rules)
+
+    budget_stats = request_budget.snapshot()
+    scan_report = {
+        **scan_stats,
+        **diversity_stats,
+        **budget_stats,
+        "seed_books": len(weighted_seeds),
+        "final_recommendations": len(selected_records),
+        "scan_mode": mode,
+        "request_budget_total": int(budget_stats["google_budget"]) + int(budget_stats["openlibrary_budget"]),
+        "request_attempts_total": int(budget_stats["google_attempts"]) + int(budget_stats["openlibrary_attempts"]),
+    }
 
     payloads: list[dict] = []
-    for uid in ordered_uids[:final_limit]:
-        record = aggregates[uid]
+    for record in selected_records:
+        book = record["book"]
+        breakdown = score_breakdown(record)
+        match_percent = final_match_percent(record)
         payloads.append(
             {
-                "book": record["book"].to_dict(),
+                "book": book.to_dict(),
                 "score": float(record["score"]),
-                "match_percent": int(record["best_percent"]),
-                "match_label": str(record["best_label"]),
-                "reasons": list(record["reasons"][:5]),
+                "match_percent": match_percent,
+                "catalogue_match_percent": int(record["best_percent"]),
+                "match_label": (
+                    "Excellent taste match" if match_percent >= 85
+                    else "Strong taste match" if match_percent >= 72
+                    else "Good taste match"
+                ),
+                "reasons": list(record["reasons"][:6]),
                 "seed_count": int(record["seed_count"]),
+                "score_breakdown": breakdown,
+                "dna": book_dna(book),
+                "scan_report": scan_report,
             }
         )
+
     unique_messages = list(dict.fromkeys(message for message in messages if message))
     messages = []
     if any("Open Library" in message for message in unique_messages):
         messages.append(
-            "Open Library was temporarily limited, so this scan used Google Books and saved catalogue data where possible."
+            "Open Library was limited or reached its scan budget. BookVerse completed the scan with Google Books and saved catalogue data."
         )
     if any("Google Books" in message for message in unique_messages):
         messages.append(
-            "Google Books was temporarily unavailable for part of this scan; cached and Open Library data filled the gap."
+            "Google Books was unavailable or reached its scan budget during part of this scan."
         )
     messages.extend(
         message for message in unique_messages

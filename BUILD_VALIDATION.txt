@@ -1,0 +1,15 @@
+BOOKVERSE v21 BUILD VALIDATION
+
+Build: Recommendation Intelligence
+Date: 2026-07-28
+
+Validation completed:
+- 66 automated tests passed.
+- 35 Python files parsed and compiled successfully.
+- Core runtime modules imported successfully with a Streamlit API stub.
+- Existing Supabase-backed SQLite data model remains compatible and migrates in place.
+
+Important:
+- No Streamlit secrets, API keys, Supabase keys or database files are included.
+- Keep the existing Streamlit Community Cloud secrets unchanged when deploying.
+- Recommendation scans remain manual and keep the previous completed set if a new scan fails.

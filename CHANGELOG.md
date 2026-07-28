@@ -1,3 +1,16 @@
+# BookVerse v21
+
+- Added profile-specific hard recommendation rules for language, audience, descriptions, ratings, length, publication years, series status and excluded book types.
+- Added a diversity control with author and primary-genre caps so scans can be tightly focused or deliberately varied.
+- Added strict shared request budgets: Fast mode allows up to 10 Google Books and 3 Open Library requests; Deep allows up to 18 and 7.
+- Added transparent scan reports showing duration, request usage, candidates checked, already-saved removals, hard-rule rejections, feedback exclusions and weak-match removals.
+- Added visible Book DNA and a points-based match breakdown on every personalised recommendation card.
+- Expanded negative learning with wrong genre, too old, too long, too short, too much romance, not dark enough and too extreme feedback.
+- Added a Recommendation Memory manager to remove one feedback record or clear all saved recommendation feedback.
+- Added Choose My Next Book, which narrows the saved recommendation set to three finalists without running another catalogue scan.
+- Added a Library Health tab with missing-metadata counts and safe one-book metadata repair that preserves library state.
+- Preserved manual refresh, profile isolation, the existing Supabase database, bulk imports, top navigation, bookcase and all v20.1 safeguards.
+
 # BookVerse v20.1
 
 - Prevents Open Library request bursts with a shared cooldown and rate limiter.

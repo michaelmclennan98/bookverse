@@ -25,6 +25,55 @@ class BookAPIError(RuntimeError):
     """Raised when an external book provider cannot complete a request."""
 
 
+class RequestBudget:
+    """Thread-safe request budget shared by one recommendation scan."""
+
+    def __init__(self, max_google: int = 999, max_openlibrary: int = 999) -> None:
+        self.max_google = max(0, int(max_google))
+        self.max_openlibrary = max(0, int(max_openlibrary))
+        self._lock = threading.Lock()
+        self._stats = {
+            "google_attempts": 0,
+            "google_successes": 0,
+            "google_errors": 0,
+            "google_denied": 0,
+            "openlibrary_attempts": 0,
+            "openlibrary_successes": 0,
+            "openlibrary_errors": 0,
+            "openlibrary_denied": 0,
+        }
+
+    def claim(self, provider: str) -> bool:
+        key = "google" if provider == "google" else "openlibrary"
+        maximum = self.max_google if key == "google" else self.max_openlibrary
+        attempts_key = f"{key}_attempts"
+        denied_key = f"{key}_denied"
+        with self._lock:
+            if int(self._stats[attempts_key]) >= maximum:
+                self._stats[denied_key] += 1
+                return False
+            self._stats[attempts_key] += 1
+            return True
+
+    def mark_success(self, provider: str) -> None:
+        key = "google" if provider == "google" else "openlibrary"
+        with self._lock:
+            self._stats[f"{key}_successes"] += 1
+
+    def mark_error(self, provider: str) -> None:
+        key = "google" if provider == "google" else "openlibrary"
+        with self._lock:
+            self._stats[f"{key}_errors"] += 1
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                **self._stats,
+                "google_budget": self.max_google,
+                "openlibrary_budget": self.max_openlibrary,
+            }
+
+
 @dataclass(slots=True)
 class SearchResponse:
     books: list[Book]
@@ -52,8 +101,9 @@ class GoogleBooksClient:
     COOLDOWN_SECONDS = 180
     _cooldown_until = 0.0
 
-    def __init__(self, api_key: str, timeout: int = 15) -> None:
+    def __init__(self, api_key: str, timeout: int = 15, request_budget: RequestBudget | None = None) -> None:
         self.api_key = api_key.strip()
+        self.request_budget = request_budget
         self.timeout = (3.5, max(5, min(int(timeout), 10)))
         # Google occasionally returns bursts of 503 responses. Keep retries low and
         # temporarily pause further Google calls so Open Library can take over quickly.
@@ -77,6 +127,8 @@ class GoogleBooksClient:
             return []
         if time.monotonic() < type(self)._cooldown_until:
             raise BookAPIError("Google Books is temporarily unavailable. Open Library results are being used.")
+        if self.request_budget is not None and not self.request_budget.claim("google"):
+            raise BookAPIError("Google Books request budget reached. BookVerse ranked the candidates already collected.")
         field_prefix = {
             "Title": "intitle:",
             "Author": "inauthor:",
@@ -102,7 +154,11 @@ class GoogleBooksClient:
             response = self.session.get(self.BASE_URL, params=params, timeout=self.timeout)
             response.raise_for_status()
             payload = response.json()
+            if self.request_budget is not None:
+                self.request_budget.mark_success("google")
         except (requests.RequestException, ValueError) as exc:
+            if self.request_budget is not None:
+                self.request_budget.mark_error("google")
             type(self)._cooldown_until = time.monotonic() + self.COOLDOWN_SECONDS
             LOGGER.warning("Google Books temporarily unavailable: %s", type(exc).__name__)
             # Never include the request URL because it contains the API key.
@@ -121,7 +177,8 @@ class OpenLibraryClient:
     _request_lock = threading.Lock()
     _last_request_at = 0.0
 
-    def __init__(self, contact: str, timeout: int = 15) -> None:
+    def __init__(self, contact: str, timeout: int = 15, request_budget: RequestBudget | None = None) -> None:
+        self.request_budget = request_budget
         self.timeout = (3.0, max(4, min(int(timeout), 7)))
         # Never retry 429 responses. Repeating a rate-limited request makes the
         # provider block last longer and was the main cause of 60+ second scans.
@@ -143,6 +200,8 @@ class OpenLibraryClient:
         cls = type(self)
         if time.monotonic() < cls._cooldown_until:
             raise BookAPIError(cls._cooldown_message())
+        if self.request_budget is not None and not self.request_budget.claim("openlibrary"):
+            raise BookAPIError("Open Library request budget reached. BookVerse ranked the candidates already collected.")
 
         # Open Library applies shared-IP limits. Serialising its requests and spacing
         # them slightly prevents five recommendation workers from creating a burst.
@@ -162,14 +221,22 @@ class OpenLibraryClient:
                     raise BookAPIError(cls._cooldown_message())
                 response.raise_for_status()
                 payload = response.json()
+                if self.request_budget is not None:
+                    self.request_budget.mark_success("openlibrary")
             except BookAPIError:
+                if self.request_budget is not None:
+                    self.request_budget.mark_error("openlibrary")
                 raise
             except requests.Timeout as exc:
+                if self.request_budget is not None:
+                    self.request_budget.mark_error("openlibrary")
                 cls._set_cooldown(cls.TIMEOUT_COOLDOWN_SECONDS, "timeout")
                 raise BookAPIError(
                     "Open Library timed out. BookVerse continued with Google Books and saved data."
                 ) from exc
             except (requests.RequestException, ValueError) as exc:
+                if self.request_budget is not None:
+                    self.request_budget.mark_error("openlibrary")
                 raise BookAPIError(
                     "Open Library is temporarily unavailable. BookVerse continued with Google Books and saved data."
                 ) from exc
@@ -247,9 +314,11 @@ class BookSearchService:
         google_api_key: str = "",
         open_library_contact: str = "bookverse-local@example.invalid",
         timeout: int = 15,
+        request_budget: RequestBudget | None = None,
     ) -> None:
-        self.google = GoogleBooksClient(google_api_key, timeout)
-        self.openlibrary = OpenLibraryClient(open_library_contact, timeout)
+        self.request_budget = request_budget
+        self.google = GoogleBooksClient(google_api_key, timeout, request_budget=request_budget)
+        self.openlibrary = OpenLibraryClient(open_library_contact, timeout, request_budget=request_budget)
 
     def search(
         self,
@@ -591,7 +660,11 @@ class BookSearchService:
         if parallel and len(hydrate_books) > 1:
             # Use independent clients because requests.Session objects are not shared across threads.
             def hydrate(book: Book) -> Book:
-                client = OpenLibraryClient("bookverse-parallel@example.invalid", timeout=8)
+                client = OpenLibraryClient(
+                    "bookverse-parallel@example.invalid",
+                    timeout=8,
+                    request_budget=self.request_budget,
+                )
                 return client.enrich_work(book)
             with ThreadPoolExecutor(max_workers=min(2, len(hydrate_books)), thread_name_prefix="bookverse-detail") as executor:
                 future_map = {executor.submit(hydrate, book): book for book in hydrate_books}
@@ -672,7 +745,11 @@ class BookSearchService:
 
         def google_job(item: tuple[str, SearchMode]) -> list[Book]:
             query, query_mode = item
-            client = GoogleBooksClient(self.google.api_key, timeout=7)
+            client = GoogleBooksClient(
+                self.google.api_key,
+                timeout=7,
+                request_budget=self.request_budget,
+            )
             return client.search(query, mode=query_mode, max_results=20, language="en")
 
         if self.google.enabled and google_queries:

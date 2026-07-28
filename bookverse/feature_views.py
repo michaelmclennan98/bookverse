@@ -7,15 +7,29 @@ from typing import Any, Callable
 import pandas as pd
 import streamlit as st
 
-from .cache import cached_mood_search
-from .config import Settings
+from .cache import cached_enrich_library_book, cached_mood_search
+from .config import Settings, get_settings
 from .database import LibraryDatabase
 from .models import Book
 from .persistent_cache import cache_stats, prune_cache
+from .recommendation_intelligence import (
+    DEFAULT_RULES,
+    RULES_SETTING_KEY,
+    book_dna,
+    normalise_rules,
+    rule_rejections,
+    rules_summary,
+)
 
 FORMATS = ("Unspecified", "Paperback", "Hardback", "eBook", "Kindle", "Audiobook", "Special edition")
 OWNERSHIP = ("Unspecified", "Owned", "Library loan", "Borrowed", "Wishlist")
-FEEDBACK_OPTIONS = ("Interested", "More like this", "Not interested", "Hide this book", "Hide this author")
+FEEDBACK_OPTIONS = (
+    "Interested", "More like this", "Not interested", "Hide this book",
+    "Hide this author", "Already read another edition", "Wrong genre",
+    "Too old", "Too long", "Too short", "Too much romance",
+    "Not dark enough", "Too extreme", "Less romance", "More intense",
+    "Lighter read",
+)
 
 
 def render_recommendation_feedback(db: LibraryDatabase, book: Book, key_prefix: str) -> None:
@@ -38,7 +52,12 @@ def render_recommendation_feedback(db: LibraryDatabase, book: Book, key_prefix: 
         preference_col, save_col = st.columns([3, 1], vertical_alignment="bottom")
         preference = preference_col.selectbox(
             "More specific feedback",
-            ("Interested", "Already read another edition", "Less romance", "More intense", "Lighter read"),
+            (
+                "Interested", "Already read another edition", "Wrong genre",
+                "Too old", "Too long", "Too short", "Too much romance",
+                "Not dark enough", "Too extreme", "Less romance",
+                "More intense", "Lighter read",
+            ),
             key=f"feedback_preference_{key_prefix}_{book.uid}",
         )
         if save_col.button("Save", key=f"feedback_save_{key_prefix}_{book.uid}", use_container_width=True):
@@ -47,6 +66,231 @@ def render_recommendation_feedback(db: LibraryDatabase, book: Book, key_prefix: 
             st.toast("Preference saved for the next scan")
             st.rerun()
 
+
+
+def render_recommendation_preferences(db: LibraryDatabase) -> None:
+    st.subheader("Recommendation rules")
+    stored = db.get_setting(RULES_SETTING_KEY, "")
+    rules = normalise_rules(stored)
+    st.caption(
+        "These are hard filters for future Fast and Deep scans. "
+        "The current saved recommendation set stays unchanged until you refresh it."
+    )
+
+    with st.form("recommendation_rules_form"):
+        a1, a2, a3, a4 = st.columns(4)
+        english_only = a1.toggle("English only", value=bool(rules["english_only"]))
+        adult_only = a2.toggle("Adults only", value=bool(rules["adult_only"]))
+        require_description = a3.toggle("Require description", value=bool(rules["require_description"]))
+        standalone_only = a4.toggle("Standalone only", value=bool(rules["standalone_only"]))
+
+        b1, b2, b3, b4 = st.columns(4)
+        exclude_textbooks = b1.toggle("Exclude textbooks", value=bool(rules["exclude_textbooks"]))
+        exclude_reference = b2.toggle("Exclude manuals/reference", value=bool(rules["exclude_reference"]))
+        exclude_childrens = b3.toggle("Exclude children's books", value=bool(rules["exclude_childrens"]))
+        exclude_nonfiction = b4.toggle("Exclude nonfiction", value=bool(rules["exclude_nonfiction"]))
+
+        c1, c2, c3 = st.columns(3)
+        exclude_poetry = c1.toggle("Exclude poetry", value=bool(rules["exclude_poetry"]))
+        exclude_graphic_novels = c2.toggle("Exclude graphic novels", value=bool(rules["exclude_graphic_novels"]))
+        exclude_religion = c3.toggle("Exclude religious books", value=bool(rules["exclude_religion"]))
+
+        d1, d2, d3 = st.columns(3)
+        minimum_public_rating = d1.slider(
+            "Minimum public rating", 0.0, 5.0,
+            float(rules["minimum_public_rating"]), 0.5,
+        )
+        minimum_rating_count = d2.number_input(
+            "Minimum number of public ratings", min_value=0, max_value=1_000_000,
+            value=int(rules["minimum_rating_count"]), step=10,
+        )
+        diversity = d3.slider(
+            "Recommendation diversity", 0, 100, int(rules["diversity"]), 5,
+            help="0 stays tightly focused. 100 deliberately spreads authors, genres and themes.",
+        )
+
+        e1, e2, e3, e4 = st.columns(4)
+        minimum_pages = e1.number_input(
+            "Minimum pages", min_value=0, max_value=5000,
+            value=int(rules["minimum_pages"]), step=25,
+        )
+        maximum_pages = e2.number_input(
+            "Maximum pages", min_value=0, max_value=5000,
+            value=int(rules["maximum_pages"]), step=25,
+        )
+        published_from = e3.number_input(
+            "Published from", min_value=0, max_value=2100,
+            value=int(rules["published_from"]), step=1,
+        )
+        published_to = e4.number_input(
+            "Published by", min_value=0, max_value=2100,
+            value=int(rules["published_to"]), step=1,
+        )
+
+        f1, f2 = st.columns(2)
+        maximum_per_author = f1.slider(
+            "Maximum recommendations per author", 1, 6,
+            int(rules["maximum_per_author"]),
+        )
+        maximum_per_primary_genre = f2.slider(
+            "Maximum recommendations per main genre", 1, 12,
+            int(rules["maximum_per_primary_genre"]),
+        )
+        save_rules = st.form_submit_button(
+            "Save recommendation rules", type="primary", use_container_width=True
+        )
+
+    if save_rules:
+        updated = normalise_rules(
+            {
+                "english_only": english_only,
+                "adult_only": adult_only,
+                "require_description": require_description,
+                "standalone_only": standalone_only,
+                "exclude_textbooks": exclude_textbooks,
+                "exclude_reference": exclude_reference,
+                "exclude_childrens": exclude_childrens,
+                "exclude_nonfiction": exclude_nonfiction,
+                "exclude_poetry": exclude_poetry,
+                "exclude_graphic_novels": exclude_graphic_novels,
+                "exclude_religion": exclude_religion,
+                "minimum_public_rating": minimum_public_rating,
+                "minimum_rating_count": int(minimum_rating_count),
+                "minimum_pages": int(minimum_pages),
+                "maximum_pages": int(maximum_pages),
+                "published_from": int(published_from),
+                "published_to": int(published_to),
+                "diversity": int(diversity),
+                "maximum_per_author": int(maximum_per_author),
+                "maximum_per_primary_genre": int(maximum_per_primary_genre),
+            }
+        )
+        db.set_setting(RULES_SETTING_KEY, json.dumps(updated, ensure_ascii=False))
+        st.session_state.personalised_dirty = True
+        st.success("Recommendation rules saved. Refresh recommendations when you are ready to apply them.")
+
+    st.caption("Active rules: " + " · ".join(rules_summary(db.get_setting(RULES_SETTING_KEY, ""))))
+
+
+def render_feedback_memory(db: LibraryDatabase) -> None:
+    with st.expander("Recommendation memory", expanded=False):
+        feedback = db.list_recommendation_feedback()
+        if not feedback:
+            st.info("No recommendation feedback has been saved yet.")
+            return
+        st.caption(
+            "BookVerse uses this memory only when you deliberately run the next recommendation scan."
+        )
+        rows = [
+            {
+                "Book": item.get("title") or item.get("uid"),
+                "Author": item.get("author") or "",
+                "Feedback": item.get("feedback") or "",
+                "Updated": item.get("updated_at") or "",
+            }
+            for item in feedback
+        ]
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        labels = {
+            f"{item.get('title') or item.get('uid')} — {item.get('feedback')}": item
+            for item in feedback
+        }
+        r1, r2 = st.columns([3, 1])
+        selected = r1.selectbox("Remove one memory", tuple(labels), key="feedback_memory_remove")
+        if r2.button("Remove", use_container_width=True, key="feedback_memory_remove_button"):
+            db.delete_recommendation_feedback(str(labels[selected]["uid"]))
+            st.session_state.personalised_dirty = True
+            st.rerun()
+        if st.button("Clear all recommendation memory", use_container_width=True):
+            removed = db.clear_recommendation_feedback()
+            st.session_state.personalised_dirty = True
+            st.success(f"Removed {removed} saved feedback records.")
+            st.rerun()
+
+
+def render_choose_next_book(db: LibraryDatabase) -> None:
+    with st.expander("Choose My Next Book", expanded=False):
+        raw = db.get_setting("personalised_last_results_v21", "") or db.get_setting("personalised_last_results_v20", "")
+        if not raw:
+            st.info("Build a recommendation set first, then this tool can narrow it to three finalists without another scan.")
+            return
+        try:
+            saved = json.loads(raw)
+            payloads = list(saved.get("results") or [])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payloads = []
+        if not payloads:
+            st.info("No saved recommendation set is available yet.")
+            return
+
+        with st.form("choose_next_book_form"):
+            q1, q2, q3, q4 = st.columns(4)
+            length = q1.selectbox("Reading commitment", ("Any", "Short under 250 pages", "Medium 250 to 450", "Long over 450"))
+            mood = q2.selectbox("Mood", ("Any", "Light", "Dark", "Suspenseful", "Emotional"))
+            series = q3.selectbox("Series preference", ("Any", "Standalone", "Series"))
+            approach = q4.selectbox("Approach", ("Closest match", "Balanced", "Something different"))
+            choose = st.form_submit_button("Choose three finalists", type="primary", use_container_width=True)
+
+        if choose:
+            ranked: list[tuple[float, dict[str, Any], Book]] = []
+            for payload in payloads:
+                try:
+                    book = Book.from_dict(payload.get("book") or payload)
+                except (TypeError, ValueError, KeyError):
+                    continue
+                dna = payload.get("dna") or book_dna(book)
+                score = float(payload.get("match_percent") or 0)
+                pages = int(book.page_count or 0)
+                if length == "Short under 250 pages" and pages and pages >= 250:
+                    continue
+                if length == "Medium 250 to 450" and pages and not 250 <= pages <= 450:
+                    continue
+                if length == "Long over 450" and pages and pages <= 450:
+                    continue
+                if mood == "Light" and dna.get("intensity") != "Light":
+                    score -= 18
+                elif mood == "Dark" and dna.get("intensity") not in {"Dark", "Extreme"}:
+                    score -= 18
+                elif mood == "Suspenseful" and dna.get("pace") != "Fast":
+                    score -= 12
+                elif mood == "Emotional" and "Emotional" not in dna.get("tones", []):
+                    score -= 10
+                series_value = str(dna.get("series") or "")
+                if series == "Standalone" and "Series" in series_value:
+                    continue
+                if series == "Series" and "Series" not in series_value:
+                    continue
+                if approach == "Something different":
+                    score = 100 - abs(score - 68)
+                elif approach == "Balanced":
+                    score -= abs(score - 80) * 0.2
+                ranked.append((score, payload, book))
+            ranked.sort(key=lambda row: row[0], reverse=True)
+            st.session_state.choose_next_results = [row[1] for row in ranked[:3]]
+
+        finalists = list(st.session_state.get("choose_next_results") or [])
+        if finalists:
+            columns = st.columns(len(finalists))
+            for column, payload in zip(columns, finalists):
+                book = Book.from_dict(payload.get("book") or payload)
+                with column:
+                    if book.best_cover:
+                        st.image(book.best_cover, width=125)
+                    st.markdown(f"**{book.display_title}**")
+                    st.caption(book.author_text)
+                    st.metric("Taste match", f"{int(payload.get('match_percent') or 0)}%")
+                    reasons = list(payload.get("reasons") or [])
+                    if reasons:
+                        st.caption(" · ".join(reasons[:2]))
+                    b1, b2 = st.columns(2)
+                    if b1.button("Want to Read", key=f"choose_want_{book.uid}", use_container_width=True):
+                        db.save_entry(book, "Want to Read")
+                        st.session_state.personalised_dirty = True
+                        st.rerun()
+                    if b2.button("Read", key=f"choose_read_{book.uid}", use_container_width=True):
+                        db.save_entry(book, "Finished", progress_pages=int(book.page_count or 0))
+                        st.session_state.personalised_dirty = True
+                        st.rerun()
 
 def render_mood_finder(
     settings: Settings,
@@ -228,7 +472,7 @@ def render_entry_tracking(db: LibraryDatabase, entry: dict[str, Any]) -> None:
 
 def render_library_tools(db: LibraryDatabase) -> None:
     with st.expander("Library tools", expanded=False):
-        series_tab, shortlist_tab, duplicate_tab = st.tabs(("Series tracker", "Shortlists", "Duplicates"))
+        series_tab, shortlist_tab, duplicate_tab, health_tab = st.tabs(("Series tracker", "Shortlists", "Duplicates", "Library health"))
         with series_tab:
             series = db.series_summary()
             if not series:
@@ -333,6 +577,74 @@ def render_library_tools(db: LibraryDatabase) -> None:
                     duplicate_uids = [entry["uid"] for entry in group if entry["uid"] != preferred["uid"]]
                     merged = db.merge_duplicate_entries(preferred["uid"], duplicate_uids)
                     st.success(f"Merged {merged} duplicate {'edition' if merged == 1 else 'editions'}.")
+                    st.rerun()
+
+
+        with health_tab:
+            entries = db.list_entries("All")
+            missing_descriptions = [entry for entry in entries if len(entry["book"].description.strip()) < 60]
+            missing_covers = [entry for entry in entries if not entry["book"].best_cover]
+            missing_pages = [entry for entry in entries if not entry["book"].page_count]
+            weak_categories = [entry for entry in entries if len(entry["book"].categories) < 2]
+            duplicate_count = sum(max(0, len(group) - 1) for group in db.duplicate_groups())
+            h1, h2, h3, h4, h5 = st.columns(5)
+            h1.metric("Saved books", len(entries))
+            h2.metric("Missing descriptions", len(missing_descriptions))
+            h3.metric("Missing covers", len(missing_covers))
+            h4.metric("Missing page counts", len(missing_pages))
+            h5.metric("Duplicate editions", duplicate_count)
+
+            unhealthy_map: dict[str, dict[str, Any]] = {}
+            for entry in entries:
+                problems: list[str] = []
+                book = entry["book"]
+                if len(book.description.strip()) < 60:
+                    problems.append("description")
+                if not book.best_cover:
+                    problems.append("cover")
+                if not book.page_count:
+                    problems.append("page count")
+                if len(book.categories) < 2:
+                    problems.append("categories")
+                if problems:
+                    unhealthy_map[
+                        f"{book.display_title} — {book.author_text} · missing {', '.join(problems)}"
+                    ] = entry
+
+            if not unhealthy_map:
+                st.success("Every saved book has a healthy core catalogue record.")
+            else:
+                st.caption(
+                    "Repairing searches for richer metadata but preserves the shelf, rating, review, progress and tracking data."
+                )
+                selected_label = st.selectbox(
+                    "Book to repair", tuple(unhealthy_map), key="library_health_selected"
+                )
+                if st.button("Repair selected book metadata", type="primary", use_container_width=True):
+                    selected = unhealthy_map[selected_label]
+                    book = selected["book"]
+                    settings = get_settings()
+                    with st.spinner("Finding the richest matching catalogue record…"):
+                        payload = cached_enrich_library_book(
+                            book.to_dict(),
+                            settings.google_books_api_key,
+                            settings.open_library_contact,
+                            settings.request_timeout_seconds,
+                            engine_version="v21-library-health",
+                            database_path=str(settings.database_path),
+                        )
+                    repaired_payload = dict(payload)
+                    repaired_payload["source"] = book.source
+                    repaired_payload["source_id"] = book.source_id
+                    repaired = Book.from_dict(repaired_payload)
+                    db.save_entry(
+                        repaired,
+                        selected["shelf"],
+                        user_rating=selected.get("user_rating"),
+                        review=str(selected.get("review") or ""),
+                        progress_pages=int(selected.get("progress_pages") or 0),
+                    )
+                    st.success(f"Repaired catalogue metadata for {repaired.display_title}.")
                     st.rerun()
 
 

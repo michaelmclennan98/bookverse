@@ -4,15 +4,18 @@
 
 BookVerse is a Streamlit reading and book-discovery app with durable Supabase-backed profiles, live Google Books and Open Library search, manual personalised recommendations, bulk imports, reading journals, series tracking, shortlists and advanced statistics.
 
-## Version 20 highlights
+## Version 21 highlights
 
 - Website-style top navigation on desktop and mobile
 - Manual recommendation scans that never run merely because a page reruns
 - The last completed recommendation set is saved separately for every profile
-- Fast and Deep recommendation modes
+- Fast and Deep recommendation modes with strict shared provider request budgets
+- Profile-specific hard recommendation rules and focused-to-varied diversity controls
+- Transparent scan reports, Book DNA and visible match-score breakdowns
+- Expanded positive and negative recommendation feedback with a memory manager
+- Choose My Next Book, which selects three finalists from the saved set without another scan
 - Parallel provider, seed, candidate-enrichment and bulk-import requests
 - Persistent catalogue cache stored in the BookVerse SQLite database
-- Recommendation feedback: interested, more like this, not interested, hide book or author, already read another edition, less romance, more intensity and lighter reads
 - Mood Finder with genre, intensity, romance, pace, rating and length controls
 - Bulk title and author matching, phone-camera ISBN barcode scanning, ISBN quick add and Goodreads or StoryGraph-style CSV import
 - Reading sessions, journal entries, quotations, personal tags and content warnings
@@ -26,10 +29,10 @@ BookVerse is a Streamlit reading and book-discovery app with durable Supabase-ba
 
 ## Main navigation
 
-- **Discover**: saved recommendations, Fast or Deep scans, Mood Finder and catalogue search
-- **Library**: bulk import, series tracker, shortlists, duplicate manager and interactive bookcase
+- **Discover**: saved recommendations, Fast or Deep scans, scan reports, Choose My Next Book, Mood Finder and catalogue search
+- **Library**: bulk import, series tracker, shortlists, duplicate manager, Library Health and interactive bookcase
 - **Stats**: goals, shelves, categories, monthly finishes, sessions, streaks and formats
-- **Settings**: taste profile, PIN changes, cloud status, scan history and cache controls
+- **Settings**: taste profile, hard recommendation rules, feedback memory, PIN changes, cloud status, scan history and cache controls
 
 ## Streamlit Community Cloud secrets
 
@@ -69,7 +72,7 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-The supplied build contains tests for profiles, backups, recommendations, catalogue matching, navigation, persistent caching, journals, series, feedback and shortlists.
+The supplied build contains tests for profiles, backups, recommendations, hard rules, Book DNA, request budgets, diversity, catalogue matching, navigation, persistent caching, journals, series, feedback and shortlists.
 
 ## Storage model
 

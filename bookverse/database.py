@@ -860,6 +860,23 @@ class LibraryDatabase:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def delete_recommendation_feedback(self, uid: str) -> None:
+        user_id = self._require_user_id()
+        with self.connection() as conn:
+            conn.execute(
+                "DELETE FROM recommendation_feedback WHERE user_id=? AND uid=?",
+                (user_id, str(uid)),
+            )
+
+    def clear_recommendation_feedback(self) -> int:
+        user_id = self._require_user_id()
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM recommendation_feedback WHERE user_id=?",
+                (user_id,),
+            )
+        return int(cursor.rowcount or 0)
+
     def create_shortlist(self, name: str) -> int:
         user_id = self._require_user_id()
         cleaned = name.strip()

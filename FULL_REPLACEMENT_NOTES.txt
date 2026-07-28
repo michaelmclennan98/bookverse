@@ -1,27 +1,36 @@
-BOOKVERSE v20 FULL REPLACEMENT
+BOOKVERSE v21 FULL REPLACEMENT
 
 HOW TO DEPLOY
 1. Replace the contents of your GitHub BookVerse repository with the contents of this ZIP.
 2. Keep your existing Streamlit Community Cloud Secrets exactly as they are. Secrets are not included in this ZIP.
-3. Commit the replacement. Streamlit will install the updated requirements and redeploy automatically.
-4. Open the app and unlock the existing profile. The existing Supabase-backed SQLite database is migrated in place; profiles and books are not intentionally reset.
+3. Commit the replacement. Streamlit will install the unchanged supported requirements and redeploy automatically.
+4. Open the app and unlock the existing profile. The existing Supabase-backed SQLite database is migrated in place; profiles and books are preserved.
 
-MAIN UPGRADES
-- Manual Fast and Deep recommendation scans; scans never start just because Streamlit reruns.
-- Each profile keeps its last successful recommendation set until the reader deliberately refreshes it.
-- Parallel provider searches, seed scans, final enrichment and five-at-a-time bulk matching.
-- Persistent catalogue cache with expiry and scan diagnostics.
-- Detailed recommendation feedback, Mood Finder and stronger preference learning.
-- Bulk title/author import, ISBN entry, phone-camera ISBN barcode scanning and CSV import.
+V21 RECOMMENDATION INTELLIGENCE
+- Manual Fast and Deep scans remain fully manual and keep the previous completed set until a new scan succeeds.
+- Strict shared request budgets stop provider bursts and bound the work performed by every scan.
+- Profile-specific hard rules cover language, audience, descriptions, ratings, length, years, series and excluded book types.
+- Focused-to-varied diversity controls enforce per-author and per-genre limits.
+- Every personalised recommendation displays Book DNA, a match percentage, reasons and a transparent points breakdown.
+- Expanded negative feedback teaches the next scan about wrong genres, age, length, romance and intensity.
+- Recommendation Memory can remove one learned preference or clear all feedback.
+- Choose My Next Book narrows the last saved set to three finalists without external requests.
+- Latest Scan Report shows duration, provider requests, cache hits, candidate counts and rejection reasons.
+- Library Health identifies weak metadata and repairs one selected book without losing its shelf, rating, progress or tracking details.
+
+PRESERVED V20 FEATURES
+- Supabase cloud restore and snapshot backup.
+- PIN-locked isolated profiles and per-profile saved recommendation sets.
+- Bulk title/author import, ISBN entry, phone-camera barcode scanning and CSV import.
 - Reading sessions, journals, quotations, personal tags, content warnings and rereads.
 - Format, ownership, audiobook progress and series tracking.
 - Shortlists, comparison tables and data-preserving duplicate-edition merging.
 - Expanded statistics, reading pace, favourite authors, genre ratings, monthly wrap-up and yearly projection.
-- Cloud status, last cloud save/restore, cache controls and scan history.
+- Persistent catalogue cache and cloud/cache diagnostics.
 - JSON backup v3 with v1 and v2 restore compatibility.
 
 VALIDATION
 - All Python files parsed and compiled successfully.
-- 59 automated tests passed in the build environment.
-- All runtime modules imported successfully using a Streamlit API stub.
+- 66 automated tests passed in the build environment.
+- Runtime modules imported successfully using a Streamlit API stub.
 - A live Streamlit server was not launched in the build container because Streamlit itself was not installed there.
