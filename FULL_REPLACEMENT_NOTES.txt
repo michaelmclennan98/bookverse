@@ -1,0 +1,27 @@
+BOOKVERSE v20 FULL REPLACEMENT
+
+HOW TO DEPLOY
+1. Replace the contents of your GitHub BookVerse repository with the contents of this ZIP.
+2. Keep your existing Streamlit Community Cloud Secrets exactly as they are. Secrets are not included in this ZIP.
+3. Commit the replacement. Streamlit will install the updated requirements and redeploy automatically.
+4. Open the app and unlock the existing profile. The existing Supabase-backed SQLite database is migrated in place; profiles and books are not intentionally reset.
+
+MAIN UPGRADES
+- Manual Fast and Deep recommendation scans; scans never start just because Streamlit reruns.
+- Each profile keeps its last successful recommendation set until the reader deliberately refreshes it.
+- Parallel provider searches, seed scans, final enrichment and five-at-a-time bulk matching.
+- Persistent catalogue cache with expiry and scan diagnostics.
+- Detailed recommendation feedback, Mood Finder and stronger preference learning.
+- Bulk title/author import, ISBN entry, phone-camera ISBN barcode scanning and CSV import.
+- Reading sessions, journals, quotations, personal tags, content warnings and rereads.
+- Format, ownership, audiobook progress and series tracking.
+- Shortlists, comparison tables and data-preserving duplicate-edition merging.
+- Expanded statistics, reading pace, favourite authors, genre ratings, monthly wrap-up and yearly projection.
+- Cloud status, last cloud save/restore, cache controls and scan history.
+- JSON backup v3 with v1 and v2 restore compatibility.
+
+VALIDATION
+- All Python files parsed and compiled successfully.
+- 59 automated tests passed in the build environment.
+- All runtime modules imported successfully using a Streamlit API stub.
+- A live Streamlit server was not launched in the build container because Streamlit itself was not installed there.

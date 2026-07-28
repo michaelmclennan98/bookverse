@@ -25,7 +25,7 @@ def _setting(name: str, default: str = "") -> str:
 @dataclass(frozen=True, slots=True)
 class Settings:
     app_name: str = "BookVerse"
-    app_version: str = "0.20.0-github"
+    app_version: str = "2.0.0"
     google_books_api_key: str = _setting("GOOGLE_BOOKS_API_KEY")
     open_library_contact: str = _setting("OPEN_LIBRARY_CONTACT")
     request_timeout_seconds: int = int(_setting("BOOKVERSE_HTTP_TIMEOUT", "15"))

@@ -29,7 +29,7 @@ st.set_page_config(
     page_title=f"{settings.app_name} — Book discovery",
     page_icon=str(ICON_PATH),
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 apply_theme()
 database = CloudLibraryDatabase(settings.database_path)

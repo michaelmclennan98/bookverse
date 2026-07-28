@@ -35,7 +35,7 @@ def test_database_crud_and_backup(tmp_path) -> None:
     assert updated["review"] == "Excellent"
 
     backup = db.backup_payload()
-    assert backup["format"] == "bookverse-backup-v2"
+    assert backup["format"] == "bookverse-backup-v3"
     assert backup["profile"]["top_books"] == ["The Shining"]
 
     other = LibraryDatabase(tmp_path / "restored.db")

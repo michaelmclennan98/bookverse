@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 from urllib.parse import quote
@@ -22,6 +23,8 @@ _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
 _RESTORED_PATHS: set[str] = set()
 _CLOUD_ERRORS: dict[str, str] = {}
+_CLOUD_LAST_UPLOAD: dict[str, str] = {}
+_CLOUD_LAST_RESTORE: dict[str, str] = {}
 
 
 def _path_key(path: Path) -> str:
@@ -304,6 +307,7 @@ class CloudLibraryDatabase(LibraryDatabase):
                     )
 
                     if remote_database_found:
+                        _CLOUD_LAST_RESTORE[self._path_key] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                         LOGGER.info(
                             "Restored BookVerse database "
                             "from Supabase."
@@ -423,6 +427,14 @@ class CloudLibraryDatabase(LibraryDatabase):
         return self._cloud.enabled
 
     @property
+    def cloud_last_upload(self) -> str:
+        return _CLOUD_LAST_UPLOAD.get(self._path_key, "")
+
+    @property
+    def cloud_last_restore(self) -> str:
+        return _CLOUD_LAST_RESTORE.get(self._path_key, "")
+
+    @property
     def cloud_error(self) -> str:
         return _CLOUD_ERRORS.get(
             self._path_key,
@@ -459,6 +471,7 @@ class CloudLibraryDatabase(LibraryDatabase):
                 self._path_key,
                 None,
             )
+            _CLOUD_LAST_UPLOAD[self._path_key] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
             LOGGER.info(
                 "Backed up BookVerse database "

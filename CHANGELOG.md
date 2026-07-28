@@ -1,3 +1,19 @@
+# BookVerse v20
+
+- Added manual Fast and Deep recommendation scans. Discover no longer starts a scan automatically.
+- Saved each profile’s last completed recommendation set in cloud-backed user settings.
+- Parallelised catalogue providers, recommendation seed scans, candidate enrichment and bulk matching.
+- Added a persistent SQLite catalogue cache with expiry and diagnostics.
+- Added detailed recommendation feedback including positive signals, rejected books, hidden authors, already-read editions, romance reduction, intensity and lighter-read preferences.
+- Added Mood Finder, CSV imports, ISBN quick add and phone-camera ISBN barcode scanning.
+- Added reading sessions, journals, quotations, personal tags, content warnings and audiobook progress.
+- Added format, ownership, reread and series tracking.
+- Added series progress, missing-volume warnings, shortlists, comparisons and data-preserving duplicate-edition merging.
+- Expanded reading statistics with favourite authors, genre ratings, monthly wrap-up, session time, reading pace, streaks, DNF rate, completion speed and yearly projection.
+- Added cloud, cache and scan diagnostics.
+- Added backup format v3 while retaining v1 and v2 restore support.
+- Preserved the existing top navigation, bookcase, profiles, Supabase sync and catalogue workflows.
+
 # BookVerse v19.5
 
 - Moved the phone-control toggle and panel lower down the mobile screen so they no longer sit against or underneath the browser/Streamlit top controls.

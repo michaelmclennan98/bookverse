@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import time
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -21,8 +22,18 @@ from .cache import (
 from .bulk_import import render_bulk_importer
 from .config import Settings, get_settings
 from .database import DEFAULT_SHELVES, LibraryDatabase
+from .feature_views import (
+    render_advanced_stats,
+    render_diagnostics,
+    render_entry_tracking,
+    render_library_tools,
+    render_mood_finder,
+    render_recommendation_feedback,
+    render_shortlist_add_control,
+)
 from .models import Book
 from .personalization import build_taste_seed, taste_fingerprint, taste_summary
+from .persistent_cache import cache_stats
 from .recommender import favourite_categories, profile_summary, rank_smart_results
 from .smart_search import SmartSearchPlan, parse_smart_query
 
@@ -629,6 +640,7 @@ def render_profile_gate(db: LibraryDatabase, settings: Settings) -> dict[str, An
                             settings.open_library_contact,
                             settings.request_timeout_seconds,
                             0,
+                            str(settings.database_path),
                         )
 
                         # Some catalogue records have weak title indexing. A second
@@ -824,6 +836,7 @@ def _lock_active_profile(db: LibraryDatabase) -> None:
                 "similar_",
                 "personalised_",
                 "bulk_",
+                "mood_",
                 "phone_",
             )
         ):
@@ -947,6 +960,7 @@ def render_discover(
         )
 
     _render_personalised_section(settings, db, api_key, profile)
+    render_mood_finder(settings, db, api_key, render_book_grid)
 
     def set_quick_query(value: str) -> None:
         st.session_state.search_text = value
@@ -1087,6 +1101,7 @@ def _load_search_page(settings: Settings, api_key: str, page_index: int) -> None
             settings.open_library_contact,
             settings.request_timeout_seconds,
             page_index,
+            str(settings.database_path),
         )
     finally:
         loader.empty()
@@ -1125,20 +1140,49 @@ def _render_personalised_section(
             st.caption("Your starter taste: " + " · ".join(niches[:8]))
         return
 
-    refresh_token = int(st.session_state.get("personalised_refresh_token", 0))
-    payloads = st.session_state.get("personalised_results")
-    needs_initial_build = payloads is None
-    refresh_requested = bool(st.session_state.pop("personalised_refresh_requested", False))
+    saved_key = "personalised_last_results_v20"
+    if "personalised_results" not in st.session_state:
+        saved_value = db.get_setting(saved_key, "")
+        if saved_value:
+            try:
+                saved_payload = json.loads(saved_value)
+                st.session_state.personalised_results = list(saved_payload.get("results") or [])
+                st.session_state.personalised_messages = list(saved_payload.get("messages") or [])
+                st.session_state.personalised_scan_mode = str(saved_payload.get("mode") or "Fast")
+                st.session_state.personalised_generated_at = str(saved_payload.get("generated_at") or "")
+                st.session_state.personalised_refresh_token = int(saved_payload.get("refresh_token") or 0)
+                st.session_state.personalised_total_books_at_scan = int(saved_payload.get("total_books") or len(entries))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                st.session_state.personalised_results = []
 
-    if needs_initial_build or refresh_requested:
-        loader = st.empty()
-        loader.markdown(
-            _loader_html(
-                "Searching from your exact favourite books…",
-                f"Building fresh recommendations from {min(len(entries), 5)} saved books and your chosen niches.",
-            ),
-            unsafe_allow_html=True,
-        )
+    payloads = list(st.session_state.get("personalised_results") or [])
+    refresh_token = int(st.session_state.get("personalised_refresh_token", 0))
+    current_mode = str(st.session_state.get("personalised_scan_mode", "Fast"))
+    if current_mode not in {"Fast", "Deep"}:
+        current_mode = "Fast"
+
+    control1, control2, control3 = st.columns([1.25, 1.15, 1.6], vertical_alignment="bottom")
+    scan_mode = control1.selectbox(
+        "Recommendation scan",
+        ("Fast", "Deep"),
+        index=0 if current_mode == "Fast" else 1,
+        help="Fast uses the strongest 3 books and fewer API requests. Deep uses the strongest 5 books and searches more widely.",
+        key="personalised_scan_mode_selector",
+    )
+    seed_count = min(len(entries), 3 if scan_mode == "Fast" else 5)
+    control2.metric("Library", f"{len(entries)} books", help=f"The scan uses the strongest {seed_count} as starting points but checks recommendations against the whole library.")
+    scan_label = "Refresh recommendations" if payloads else "Build recommendations"
+    scan_requested = control3.button(scan_label, type="primary", use_container_width=True, key="manual_personalised_scan")
+
+    st.caption(
+        f"{len(entries)} books are saved. {scan_mode} mode scans from the strongest {seed_count} while excluding anything already in the full library. "
+        "The previous completed set remains visible until this button is pressed."
+    )
+
+    if scan_requested:
+        old_payloads = payloads
+        old_messages = list(st.session_state.get("personalised_messages") or [])
+        next_token = refresh_token + 1
         entry_payloads = [
             {
                 "book": entry["book"].to_dict(),
@@ -1148,22 +1192,98 @@ def _render_personalised_section(
             }
             for entry in entries
         ]
+        feedback = db.list_recommendation_feedback()
+        before_cache = cache_stats(settings.database_path)
+        started = time.perf_counter()
+        loader = st.empty()
+        loader.markdown(
+            _loader_html(
+                "Searching from your strongest books…",
+                f"{scan_mode} scan: {seed_count} starting books, checked against all {len(entries)} saved books.",
+            ),
+            unsafe_allow_html=True,
+        )
         try:
-            payloads, messages = cached_personalised(
-                profile, entry_payloads, api_key, settings.open_library_contact,
-                settings.request_timeout_seconds, 24,
-                engine_version="v19.2-balanced-rich", refresh_token=refresh_token,
+            new_payloads, messages = cached_personalised(
+                profile,
+                entry_payloads,
+                api_key,
+                settings.open_library_contact,
+                settings.request_timeout_seconds,
+                24 if scan_mode == "Deep" else 18,
+                engine_version="v20-parallel-persistent-feedback",
+                refresh_token=next_token,
+                scan_mode=scan_mode,
+                database_path=str(settings.database_path),
+                feedback_payload=feedback,
             )
+        except Exception as exc:
+            new_payloads = []
+            messages = [f"The scan could not finish: {exc}"]
         finally:
             loader.empty()
-        st.session_state.personalised_results = payloads
-        st.session_state.personalised_messages = messages
-        st.session_state.personalised_display_offset = 0
-        st.session_state.personalised_dirty = False
+        duration = time.perf_counter() - started
+        after_cache = cache_stats(settings.database_path)
+        cache_hits = max(0, int(after_cache.get("hits", 0)) - int(before_cache.get("hits", 0)))
+        estimated_requests = seed_count * (10 if scan_mode == "Deep" else 5) + (5 if scan_mode == "Deep" else 2)
+
+        if new_payloads:
+            generated_at = datetime.now().isoformat(timespec="seconds")
+            st.session_state.personalised_results = new_payloads
+            st.session_state.personalised_messages = messages
+            st.session_state.personalised_display_offset = 0
+            st.session_state.personalised_dirty = False
+            st.session_state.personalised_refresh_token = next_token
+            st.session_state.personalised_scan_mode = scan_mode
+            st.session_state.personalised_generated_at = generated_at
+            st.session_state.personalised_total_books_at_scan = len(entries)
+            db.set_setting(
+                saved_key,
+                json.dumps(
+                    {
+                        "results": new_payloads,
+                        "messages": messages,
+                        "mode": scan_mode,
+                        "generated_at": generated_at,
+                        "refresh_token": next_token,
+                        "total_books": len(entries),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            db.add_scan_history(
+                "Personalised recommendations",
+                scan_mode,
+                duration,
+                estimated_requests,
+                cache_hits,
+                len(new_payloads),
+                {"library_books": len(entries), "seed_books": seed_count},
+            )
+            payloads = list(new_payloads)
+            refresh_token = next_token
+            st.success(f"Saved {len(new_payloads)} recommendations for this profile in {duration:.1f} seconds.")
+        else:
+            st.session_state.personalised_results = old_payloads
+            st.session_state.personalised_messages = old_messages
+            if old_payloads:
+                st.warning("The new scan returned no usable matches, so the previous saved set has been kept.")
+            else:
+                st.warning("No usable recommendations were returned. Your library was not changed.")
+            for message in messages:
+                st.caption(message)
 
     for message in st.session_state.get("personalised_messages", []):
         st.caption(message)
-    payloads = st.session_state.get("personalised_results", [])
+    payloads = list(st.session_state.get("personalised_results") or [])
+
+    if st.session_state.get("personalised_dirty") and payloads:
+        st.info("Your library or feedback changed. The saved recommendations remain in place until you press **Refresh recommendations**.")
+
+    if not payloads:
+        st.info("No recommendation set is saved yet. Choose Fast or Deep and press **Build recommendations**. Nothing runs automatically.")
+        return
+
     offset = max(0, int(st.session_state.get("personalised_display_offset", 0)))
     if offset >= len(payloads):
         offset = 0
@@ -1171,82 +1291,70 @@ def _render_personalised_section(
     visible_payloads = payloads[offset:offset + 6]
     books = [Book.from_dict(payload.get("book") or payload) for payload in visible_payloads]
 
-    if st.session_state.get("personalised_dirty"):
-        st.info("Your library changed. These recommendations stay in place until you press **Refresh from my library**.")
+    summary = taste_summary(profile, entries, 8)
+    if summary:
+        st.caption("Taste detected: " + " · ".join(summary))
+    batch_number = (offset // 6) + 1
+    total_batches = max(1, (len(payloads) + 5) // 6)
+    generated = st.session_state.get("personalised_generated_at") or "previous session"
+    saved_mode = st.session_state.get("personalised_scan_mode") or scan_mode
+    st.caption(
+        f"Saved {saved_mode} set · built {generated} · batch {batch_number} of {total_batches}. "
+        "Changing pages never runs a new scan."
+    )
+    render_book_grid(books, db, settings, api_key, context=f"personalised_{refresh_token}_{offset}")
 
-    if books:
-        summary = taste_summary(profile, entries, 8)
-        if summary:
-            st.caption("Taste detected: " + " · ".join(summary))
-        batch_number = (offset // 6) + 1
-        total_batches = max(1, (len(payloads) + 5) // 6)
-        st.caption(f"Recommendation set {refresh_token + 1} · batch {batch_number} of {total_batches}. Refreshing only changes the suggestions — it never saves a book.")
-        render_book_grid(books, db, settings, api_key, context=f"personalised_{refresh_token}_{offset}")
+    selection_scope = f"personalised_{refresh_token}_{offset}"
+    selected_uids = {
+        book.uid for book in books
+        if st.session_state.get(f"select_{selection_scope}_{book.uid}", False)
+    }
+    st.markdown("#### Selected-book actions")
+    count_col, batch_want, batch_read, batch_clear = st.columns([0.7, 1.4, 1.4, 1])
+    count_col.metric("Selected", len(selected_uids))
+    has_selection = bool(selected_uids)
+    if batch_want.button(
+        "Add selected to Want to Read",
+        use_container_width=True,
+        disabled=not has_selection,
+        key=f"bulk_want_{selection_scope}",
+    ):
+        for book in books:
+            if book.uid in selected_uids:
+                db.save_entry(book, "Want to Read")
+        _invalidate_personalised_feed()
+        _clear_personalised_selection()
+        st.toast(f"Added {len(selected_uids)} books to Want to Read", icon="📚")
+        st.rerun()
+    if batch_read.button(
+        "Mark selected as Read",
+        use_container_width=True,
+        disabled=not has_selection,
+        key=f"bulk_read_{selection_scope}",
+    ):
+        for book in books:
+            if book.uid in selected_uids:
+                db.save_entry(book, "Finished", progress_pages=int(book.page_count or 0))
+        _invalidate_personalised_feed()
+        _clear_personalised_selection()
+        st.toast(f"Marked {len(selected_uids)} books as read", icon="✅")
+        st.rerun()
+    if batch_clear.button(
+        "Clear selection",
+        use_container_width=True,
+        disabled=not has_selection,
+        key=f"bulk_clear_{selection_scope}",
+    ):
+        _clear_personalised_selection()
+        st.rerun()
+    if not has_selection:
+        st.caption("Tick **Select** on one or more recommendations, then use the buttons above.")
 
-        selection_scope = f"personalised_{refresh_token}_{offset}"
-        selected_uids = {
-            book.uid for book in books
-            if st.session_state.get(f"select_{selection_scope}_{book.uid}", False)
-        }
-
-        st.markdown("#### Selected-book actions")
-        count_col, batch_want, batch_read, batch_clear = st.columns([0.7, 1.4, 1.4, 1])
-        count_col.metric("Selected", len(selected_uids))
-        has_selection = bool(selected_uids)
-        if batch_want.button(
-            "Add selected to Want to Read",
-            use_container_width=True,
-            disabled=not has_selection,
-            key=f"bulk_want_{selection_scope}",
-        ):
-            for book in books:
-                if book.uid in selected_uids:
-                    db.save_entry(book, "Want to Read")
-            _invalidate_personalised_feed()
-            _clear_personalised_selection()
-            st.toast(f"Added {len(selected_uids)} books to Want to Read", icon="📚")
-            st.rerun()
-        if batch_read.button(
-            "Mark selected as Read",
-            use_container_width=True,
-            disabled=not has_selection,
-            key=f"bulk_read_{selection_scope}",
-        ):
-            for book in books:
-                if book.uid in selected_uids:
-                    db.save_entry(book, "Finished", progress_pages=int(book.page_count or 0))
-            _invalidate_personalised_feed()
-            _clear_personalised_selection()
-            st.toast(f"Marked {len(selected_uids)} books as read", icon="✅")
-            st.rerun()
-        if batch_clear.button(
-            "Clear selection",
-            use_container_width=True,
-            disabled=not has_selection,
-            key=f"bulk_clear_{selection_scope}",
-        ):
-            _clear_personalised_selection()
-            st.rerun()
-
-        if not has_selection:
-            st.caption("Tick **Select** on one or more recommendations, then use the buttons above.")
-
-        nav1, nav2 = st.columns(2)
-        if nav1.button("Next recommendation batch", use_container_width=True, disabled=total_batches <= 1):
-            st.session_state.personalised_display_offset = (offset + 6) % max(len(payloads), 1)
-            st.rerun()
-        if nav2.button("Refresh from my library", type="primary", use_container_width=True):
-            st.session_state.personalised_refresh_token = refresh_token + 1
-            st.session_state.personalised_refresh_requested = True
-            st.session_state.personalised_display_offset = 0
-            _clear_personalised_selection()
-            st.rerun()
-    else:
-        st.warning("The live catalogues returned no new books this time.")
-        if st.button("Refresh from my library", type="primary", use_container_width=True):
-            st.session_state.personalised_refresh_token = refresh_token + 1
-            st.session_state.personalised_refresh_requested = True
-            st.rerun()
+    nav1, nav2 = st.columns(2)
+    if nav1.button("Next recommendation batch", use_container_width=True, disabled=total_batches <= 1):
+        st.session_state.personalised_display_offset = (offset + 6) % max(len(payloads), 1)
+        st.rerun()
+    nav2.caption("A fresh scan only starts from the button above.")
 
 
 def render_book_grid(
@@ -1320,6 +1428,9 @@ def render_book_card(
                 "BookVerse will still try both catalogues when full details are opened."
             )
 
+        if key_prefix.startswith("personalised_"):
+            render_recommendation_feedback(db, book, key_prefix)
+
         if st.button(
             "View full details",
             key=f"details_{key_prefix}_{book.uid}",
@@ -1339,6 +1450,7 @@ def render_book_card(
                     api_key,
                     settings.open_library_contact,
                     settings.request_timeout_seconds,
+                    database_path=str(settings.database_path),
                 )
             finally:
                 loader.empty()
@@ -1416,6 +1528,8 @@ def render_book_card(
                     settings.open_library_contact,
                     settings.request_timeout_seconds,
                     24,
+                    scan_mode="Fast",
+                    database_path=str(settings.database_path),
                 )
             finally:
                 loader.empty()
@@ -1460,6 +1574,7 @@ def render_catalogue_book_dialog(db: LibraryDatabase) -> None:
         _invalidate_personalised_feed()
         st.toast(f"Marked {book.display_title} as read", icon="✅")
         st.rerun()
+    render_shortlist_add_control(db, book.uid, f"catalogue_{book.uid}")
     if close.button("Close", use_container_width=True, key=f"detail_close_{book.uid}"):
         st.session_state.show_catalogue_detail_dialog = False
         st.session_state.pop("catalogue_detail_book", None)
@@ -1749,6 +1864,7 @@ def render_library(db: LibraryDatabase) -> None:
     )
 
     render_bulk_importer(db)
+    render_library_tools(db)
 
     entries_all = db.list_entries("All")
     shelves = ["All", *db.shelves()]
@@ -1964,6 +2080,7 @@ def render_bookcase_book_dialog(db: LibraryDatabase, entry: dict[str, Any]) -> N
             enriched_payload = cached_enrich_library_book(
                 book.to_dict(), settings.google_books_api_key,
                 settings.open_library_contact, settings.request_timeout_seconds,
+                database_path=str(settings.database_path),
             )
         enriched_book = Book.from_dict(enriched_payload)
         if enriched_book.to_dict() != book.to_dict():
@@ -2047,6 +2164,9 @@ def render_bookcase_book_dialog(db: LibraryDatabase, entry: dict[str, Any]) -> N
         st.session_state.pop("library_selected_uid", None)
         st.toast("Bookcase updated", icon="📚")
         st.rerun()
+
+    render_entry_tracking(db, db.get_entry(entry["uid"]) or entry)
+    render_shortlist_add_control(db, entry["uid"], f"library_{entry['uid']}")
 
     remove, close = st.columns(2)
     if remove.button("Remove book", use_container_width=True, key=f"case_remove_{entry['uid']}"):
@@ -2211,6 +2331,8 @@ def render_stats(db: LibraryDatabase) -> None:
         ).set_index("Month")
         st.line_chart(monthly_df)
 
+    render_advanced_stats(db)
+
 
 def render_settings_about(
     settings: Settings,
@@ -2308,18 +2430,19 @@ def render_settings_about(
                     st.success("Profile deleted.")
                     st.rerun()
 
+    render_diagnostics(settings, db)
+
     st.subheader("What this version does")
     st.markdown(
         """
-        - PIN-locked local profiles with separate libraries, shelves, goals and taste data
-        - Exact-book top picks during setup, automatically marked as Finished
-        - Profile deletion with username, PIN and irreversible-action confirmation
-        - Search-result pagination with Previous and Next page controls
-        - Personalised **For You** recommendations after at least three saved books
-        - Taste learning from favourites, ratings, finished books, chosen niches and top books
-        - Live searches across Open Library and Google Books
-        - Natural-language search, Book DNA matching and rating filters
-        - CSV export and profile-specific JSON backup/restore
+        - PIN-locked cloud-backed profiles with separate libraries, shelves, goals and saved recommendation sets
+        - Manual Fast and Deep recommendation scans with persistent catalogue caching and detailed feedback learning
+        - Live Google Books and Open Library search, Mood Finder, Book DNA matching and rating filters
+        - Bulk title and author matching, ISBN entry, phone-camera barcode scanning and CSV imports
+        - Reading sessions, journals, quotations, tags, warnings, formats, ownership and audiobook progress
+        - Series tracking, shortlists, comparison tables and data-preserving duplicate-edition merging
+        - Expanded reading statistics, monthly wrap-ups, favourite authors, streaks and yearly projections
+        - Profile-specific JSON backup and restore plus readable CSV export
         """
     )
     st.warning(

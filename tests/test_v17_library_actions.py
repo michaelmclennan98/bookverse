@@ -26,8 +26,10 @@ def test_personalised_refresh_cycles_and_uses_live_refresh_token() -> None:
     source = _function_source("_render_personalised_section")
     assert "personalised_display_offset" in source
     assert "personalised_refresh_token" in source
-    assert "refresh_token=refresh_token" in source
-    assert "Refreshing only changes the suggestions — it never saves a book." in source
+    assert "scan_requested" in source
+    assert "refresh_token=next_token" in source
+    assert "Nothing runs automatically" in source
+    assert "personalised_last_results_v20" in source
 
 
 def test_all_catalogue_cards_have_explicit_read_actions() -> None:
@@ -86,4 +88,5 @@ def test_cached_personalised_refresh_token_changes_query_and_order() -> None:
     source = CACHE_PATH.read_text(encoding="utf-8")
     assert "refresh_token: int = 0" in source
     assert "page_index=refresh_token % 4" in source
-    assert "shift = (refresh_token * 6) % len(ranked_records)" in source
+    assert "shift = (max(0, int(refresh_token)) * 2) % len(bucket)" in source
+    assert "ThreadPoolExecutor" in source

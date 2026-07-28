@@ -4,21 +4,20 @@ from pathlib import Path
 VIEWS_PATH = Path(__file__).parents[1] / "bookverse" / "views.py"
 
 
-def test_phone_controls_are_persistent_and_staged():
+def test_website_top_navigation_replaces_hidden_phone_menu():
     source = VIEWS_PATH.read_text(encoding="utf-8")
-    assert 'key="show_phone_controls"' in source
-    assert 'key="mobile_page_selector"' in source
-    assert 'key="mobile_go_button"' in source
-    assert 'st.session_state.phone_active_page = page' in source
-    assert 'Selecting an option does not navigate by itself' in source
+    assert 'key="top_navigation"' in source
+    assert 'key="top_nav_links"' in source
+    assert 'top_navigation_{page_name}' in source
+    assert 'key="show_phone_controls"' not in source
+    assert 'key="mobile_go_button"' not in source
 
 
-def test_phone_controls_preserve_session_and_hide_inaccessible_sidebar_on_mobile():
+def test_top_navigation_is_responsive_and_sidebar_is_hidden():
     source = VIEWS_PATH.read_text(encoding="utf-8")
     assert '@media (max-width: 768px)' in source
     assert '[data-testid="stSidebar"]' in source
-    assert '_set_active_page(staged_page)' in source
+    assert '.st-key-top_navigation' in source
+    assert '.st-key-top_nav_links' in source
     assert 'st.session_state.active_page = page' in source
-    assert 'top: calc(3.75rem + env(safe-area-inset-top))' in source
-    assert 'margin: 3.6rem 0 .7rem' in source
     assert 'env(safe-area-inset-bottom)' in source

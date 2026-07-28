@@ -2,127 +2,77 @@
 
 ![BookVerse logo](assets/logo_full.png)
 
-BookVerse is a Streamlit book-discovery app with live Google Books and Open Library search, Book DNA recommendations, profiles, shelves, ratings, reading progress, personalised picks, mobile controls, batch library actions, and an interactive bookcase.
+BookVerse is a Streamlit reading and book-discovery app with durable Supabase-backed profiles, live Google Books and Open Library search, manual personalised recommendations, bulk imports, reading journals, series tracking, shortlists and advanced statistics.
 
-## Main features
+## Version 20 highlights
 
-- Search by title, author, genre, ISBN, or natural-language description
-- Similar-book recommendations using genre, audience, format, themes, tone, and content intensity
-- Personalised recommendations learned from top books, saved books, shelves, and ratings
-- PIN-separated local profiles
-- Want to Read, Reading, Read, DNF, custom shelves, reviews, and progress
-- Interactive bookcase with clickable spines
-- Desktop and mobile navigation controls
-- Google Books plus Open Library catalogue merging
-- English-language recommendation filtering
-- SQLite local storage, JSON backup, and CSV export
+- Website-style top navigation on desktop and mobile
+- Manual recommendation scans that never run merely because a page reruns
+- The last completed recommendation set is saved separately for every profile
+- Fast and Deep recommendation modes
+- Parallel provider, seed, candidate-enrichment and bulk-import requests
+- Persistent catalogue cache stored in the BookVerse SQLite database
+- Recommendation feedback: interested, more like this, not interested, hide book or author, already read another edition, less romance, more intensity and lighter reads
+- Mood Finder with genre, intensity, romance, pace, rating and length controls
+- Bulk title and author matching, phone-camera ISBN barcode scanning, ISBN quick add and Goodreads or StoryGraph-style CSV import
+- Reading sessions, journal entries, quotations, personal tags and content warnings
+- Format, ownership, audiobook progress and reread tracking
+- Series tracker with missing-number warnings and next-book guidance
+- Shortlists with side-by-side book comparison
+- Duplicate-edition detection with data-preserving edition merging
+- Expanded reading statistics, favourite authors, genre ratings, monthly wrap-up, streaks, completion time, reading pace and yearly projection
+- Cloud, cache and scan diagnostics
+- JSON backup format v3, while restoring v1 and v2 backups remains supported
 
-## Important deployment warning
+## Main navigation
 
-BookVerse currently stores profiles and libraries in SQLite. This is reliable for local use. Streamlit Community Cloud can run the app, but its local filesystem is not intended as durable multi-user storage. Profiles and library changes may be lost after a restart, rebuild, sleep cycle, or redeployment.
+- **Discover**: saved recommendations, Fast or Deep scans, Mood Finder and catalogue search
+- **Library**: bulk import, series tracker, shortlists, duplicate manager and interactive bookcase
+- **Stats**: goals, shelves, categories, monthly finishes, sessions, streaks and formats
+- **Settings**: taste profile, PIN changes, cloud status, scan history and cache controls
 
-Use the Community Cloud version as a demonstration or private test. Before a public launch, move data to hosted PostgreSQL or Supabase and replace local PINs with proper authentication.
+## Streamlit Community Cloud secrets
 
-## Quick local setup on macOS
-
-```bash
-cd ~/Downloads/bookverse_streamlit
-chmod +x scripts/setup_mac.sh scripts/run_mac.sh
-./scripts/setup_mac.sh
-```
-
-Open `.streamlit/secrets.toml` and enter:
+Paste these in **Manage app → Settings → Secrets**:
 
 ```toml
 GOOGLE_BOOKS_API_KEY = "your_google_books_api_key"
 OPEN_LIBRARY_CONTACT = "you@example.com"
-BOOKVERSE_HTTP_TIMEOUT = "15"
+BOOKVERSE_HTTP_TIMEOUT = "10"
 BOOKVERSE_DATA_DIR = "data"
+
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_SECRET_KEY = "sb_secret_your_key"
+SUPABASE_STORAGE_BUCKET = "bookverse-data"
+SUPABASE_DATABASE_FILE = "bookverse.db"
 ```
 
-Then run:
+Never commit the secret key to GitHub.
 
-```bash
-./scripts/run_mac.sh
-```
-
-The normal local address is `http://localhost:8501`.
-
-## Manual local setup
+## Local setup
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-mkdir -p .streamlit data
-cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+mkdir -p data
 streamlit run app.py
 ```
 
-## GitHub preparation
-
-This package is already prepared with:
-
-- `.gitignore` excluding API keys, secrets, databases, virtual environments, and backups
-- `.env.example` and `.streamlit/secrets.example.toml`
-- `requirements.txt` in the repository root
-- GitHub Actions tests under `.github/workflows/tests.yml`
-- `LICENSE`, `SECURITY.md`, `DEPLOYMENT.md`, and a complete upload/deployment guide
-- No embedded Google Books API key
-
-Read [GITHUB_AND_STREAMLIT_GUIDE.md](GITHUB_AND_STREAMLIT_GUIDE.md) before uploading.
+The local address is normally `http://localhost:8501`.
 
 ## Tests
 
 ```bash
-source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q
 ```
 
-GitHub Actions also runs the tests automatically for pushes and pull requests.
+The supplied build contains tests for profiles, backups, recommendations, catalogue matching, navigation, persistent caching, journals, series, feedback and shortlists.
 
-## Repository structure
+## Storage model
 
-```text
-bookverse_streamlit/
-├── app.py
-├── bookverse/
-│   ├── api_clients.py
-│   ├── cache.py
-│   ├── config.py
-│   ├── database.py
-│   ├── language_utils.py
-│   ├── models.py
-│   ├── personalization.py
-│   ├── recommender.py
-│   ├── smart_search.py
-│   └── views.py
-├── assets/
-├── data/.gitkeep
-├── tests/
-├── scripts/
-├── .github/workflows/tests.yml
-├── .streamlit/config.toml
-├── .streamlit/secrets.example.toml
-├── requirements.txt
-├── requirements-dev.txt
-├── DEPLOYMENT.md
-├── SECURITY.md
-└── GITHUB_AND_STREAMLIT_GUIDE.md
-```
+BookVerse continues to use SQLite for its application data so the existing app remains compatible. `CloudLibraryDatabase` restores the SQLite file from a private Supabase Storage bucket at startup and uploads consistent snapshots after changes. The persistent catalogue cache is stored inside the same database and therefore travels with the cloud snapshot after completed scans and library writes.
 
-## Secrets
-
-The application checks settings in this order:
-
-1. Environment variables
-2. Streamlit secrets
-3. Safe default values
-
-Never commit `.streamlit/secrets.toml` or a real `.env` file.
-
-## Licence
-
-MIT. See [LICENSE](LICENSE).
+This design is appropriate for a private or lightly shared Streamlit app. A high-concurrency public service should eventually move the tables to hosted PostgreSQL and use full hosted authentication.
