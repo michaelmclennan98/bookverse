@@ -1211,7 +1211,7 @@ def _render_personalised_section(
                 settings.open_library_contact,
                 settings.request_timeout_seconds,
                 24 if scan_mode == "Deep" else 18,
-                engine_version="v20-parallel-persistent-feedback",
+                engine_version="v20.1-rate-limit-quality",
                 refresh_token=next_token,
                 scan_mode=scan_mode,
                 database_path=str(settings.database_path),
@@ -1225,7 +1225,7 @@ def _render_personalised_section(
         duration = time.perf_counter() - started
         after_cache = cache_stats(settings.database_path)
         cache_hits = max(0, int(after_cache.get("hits", 0)) - int(before_cache.get("hits", 0)))
-        estimated_requests = seed_count * (10 if scan_mode == "Deep" else 5) + (5 if scan_mode == "Deep" else 2)
+        estimated_requests = seed_count * (5 if scan_mode == "Deep" else 3) + (2 if scan_mode == "Deep" else 1)
 
         if new_payloads:
             generated_at = datetime.now().isoformat(timespec="seconds")
@@ -1273,7 +1273,25 @@ def _render_personalised_section(
             for message in messages:
                 st.caption(message)
 
-    for message in st.session_state.get("personalised_messages", []):
+    saved_messages = [
+        str(message) for message in st.session_state.get("personalised_messages", [])
+        if str(message).strip()
+    ]
+    display_messages: list[str] = []
+    if any("Open Library" in message for message in saved_messages):
+        display_messages.append(
+            "Open Library was temporarily limited during this saved scan. "
+            "Google Books and saved catalogue data were used where possible."
+        )
+    if any("Google Books" in message for message in saved_messages):
+        display_messages.append(
+            "Google Books was temporarily unavailable during part of this saved scan."
+        )
+    display_messages.extend(
+        message for message in saved_messages
+        if "Open Library" not in message and "Google Books" not in message
+    )
+    for message in list(dict.fromkeys(display_messages))[:3]:
         st.caption(message)
     payloads = list(st.session_state.get("personalised_results") or [])
 

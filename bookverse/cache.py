@@ -319,11 +319,14 @@ def cached_personalised(
     def scan_seed(item: tuple[float, Book]) -> tuple[float, Book, list[Any], list[str]]:
         weight, seed = item
         service = BookSearchService(google_api_key, open_library_contact, timeout)
-        enriched_seed = service.prepare_recommendation_seed(seed)
+        try:
+            enriched_seed = service.prepare_recommendation_seed(seed, scan_mode=mode)
+        except TypeError:
+            enriched_seed = service.prepare_recommendation_seed(seed)
         try:
             response = service.recommendation_candidates(
                 enriched_seed,
-                max_results=145 if mode == "Deep" else 75,
+                max_results=90 if mode == "Deep" else 55,
                 scan_mode=mode,
             )
         except TypeError:
@@ -335,7 +338,7 @@ def cached_personalised(
             candidates = service.enrich_recommendation_candidates(
                 enriched_seed,
                 response.books,
-                limit=12 if mode == "Deep" else 5,
+                limit=5 if mode == "Deep" else 2,
                 parallel=True,
             )
         except TypeError:
@@ -347,7 +350,7 @@ def cached_personalised(
         ranked = rank_similar_detailed(
             enriched_seed,
             candidates,
-            limit=14 if mode == "Deep" else 9,
+            limit=10 if mode == "Deep" else 8,
         )
         return weight, seed, ranked, response.provider_messages
 
@@ -355,7 +358,7 @@ def cached_personalised(
     seed_buckets: list[list[str]] = []
     messages: list[str] = []
 
-    workers = min(5 if mode == "Deep" else 3, len(weighted_seeds))
+    workers = min(3 if mode == "Deep" else 2, len(weighted_seeds))
     with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="bookverse-seed") as executor:
         futures = [executor.submit(scan_seed, item) for item in weighted_seeds]
         for future in as_completed(futures):
@@ -367,6 +370,8 @@ def cached_personalised(
             messages.extend(provider_messages)
             bucket: list[str] = []
             for result in ranked:
+                if float(result.score) < 0.13 or int(result.match_percent) < 58:
+                    continue
                 book = result.book
                 if (
                     book.uid in saved_uids
@@ -409,15 +414,15 @@ def cached_personalised(
 
     # Niche searches fill genuine gaps, but Fast mode keeps them tightly bounded.
     niches = [str(value).strip() for value in profile_payload.get("favourite_niches") or [] if str(value).strip()]
-    niche_limit = 5 if mode == "Deep" else 2
+    niche_limit = 3 if mode == "Deep" else 1
 
     def scan_niche(niche: str) -> tuple[str, list[Book], list[str]]:
         service = BookSearchService(google_api_key, open_library_contact, timeout)
         response = service.search(
             query=niche,
             mode="Genre / subject",
-            provider="Auto" if mode == "Fast" else "Both",
-            max_results=30 if mode == "Deep" else 18,
+            provider="Auto",
+            max_results=20 if mode == "Deep" else 15,
             language="en",
             order_by="relevance",
             ebook_filter="",
@@ -426,7 +431,7 @@ def cached_personalised(
         return niche, response.books, response.provider_messages
 
     if len(aggregates) < final_limit * 2 and niches:
-        with ThreadPoolExecutor(max_workers=min(3, niche_limit), thread_name_prefix="bookverse-niche") as executor:
+        with ThreadPoolExecutor(max_workers=min(2, niche_limit), thread_name_prefix="bookverse-niche") as executor:
             futures = [executor.submit(scan_niche, niche) for niche in niches[:niche_limit]]
             for future in as_completed(futures):
                 try:
@@ -440,35 +445,67 @@ def cached_personalised(
                     author_key = _normalise(book.author_text)
                     if author_key and author_key in hidden_authors:
                         continue
+
+                    # Niche-search results must still prove a real match to at least
+                    # one strong saved book. This blocks textbooks, grammar manuals
+                    # and other keyword-only false positives from entering the set.
+                    best_result = None
+                    for _seed_weight, seed_book in weighted_seeds:
+                        ranked_one = rank_similar_detailed(seed_book, [book], limit=1)
+                        if ranked_one and (
+                            best_result is None
+                            or float(ranked_one[0].score) > float(best_result.score)
+                        ):
+                            best_result = ranked_one[0]
+                    if best_result is None or float(best_result.score) < 0.13 or int(best_result.match_percent) < 58:
+                        continue
+
                     record = aggregates.setdefault(
                         book.uid,
                         {
                             "book": book,
                             "score": 0.0,
-                            "best_percent": 55,
-                            "best_label": "Taste match",
+                            "best_percent": int(best_result.match_percent),
+                            "best_label": str(best_result.match_label),
                             "reasons": [],
                             "seed_count": 0,
                         },
                     )
-                    record["score"] += (0.55 + (0.15 if author_key in liked_authors else 0.0)) * preference_multiplier(book)
-                    if f"matches your {niche} preference" not in record["reasons"]:
-                        record["reasons"].append(f"matches your {niche} preference")
+                    multiplier = preference_multiplier(book)
+                    if author_key in liked_authors:
+                        multiplier += 0.15
+                    record["score"] += float(best_result.score) * multiplier
+                    record["seed_count"] += 1
+                    record["best_percent"] = max(int(record["best_percent"]), int(best_result.match_percent))
+                    for reason in [f"matches your {niche} preference", *list(best_result.reasons)]:
+                        if reason and reason not in record["reasons"]:
+                            record["reasons"].append(reason)
 
-    ordered_uids: list[str] = []
-    # Round-robin preserves range across the reader's strongest books.
-    while any(seed_buckets) and len(ordered_uids) < final_limit * 2:
-        for bucket in seed_buckets:
-            if bucket:
-                uid = bucket.pop(0)
-                if uid not in ordered_uids:
-                    ordered_uids.append(uid)
-    remaining = sorted(
-        (uid for uid in aggregates if uid not in ordered_uids),
-        key=lambda uid: (aggregates[uid]["seed_count"], aggregates[uid]["score"]),
+    # Rank the completed aggregate globally so the first page contains the
+    # strongest evidence, rather than one weak result from every seed. Keep a small
+    # author cap to preserve variety.
+    ranked_uids = sorted(
+        aggregates,
+        key=lambda uid: (
+            int(aggregates[uid]["best_percent"]),
+            int(aggregates[uid]["seed_count"]),
+            float(aggregates[uid]["score"]),
+            int(bool(aggregates[uid]["book"].description)),
+            int(aggregates[uid]["book"].ratings_count or 0),
+        ),
         reverse=True,
     )
-    ordered_uids.extend(remaining)
+    ordered_uids: list[str] = []
+    author_counts: dict[str, int] = {}
+    for uid in ranked_uids:
+        book = aggregates[uid]["book"]
+        author_key = _normalise(book.author_text) or uid
+        if author_counts.get(author_key, 0) >= 2:
+            continue
+        author_counts[author_key] = author_counts.get(author_key, 0) + 1
+        ordered_uids.append(uid)
+        if len(ordered_uids) >= final_limit:
+            break
 
     payloads: list[dict] = []
     for uid in ordered_uids[:final_limit]:
@@ -483,7 +520,21 @@ def cached_personalised(
                 "seed_count": int(record["seed_count"]),
             }
         )
-    messages = list(dict.fromkeys(message for message in messages if message))[:10]
+    unique_messages = list(dict.fromkeys(message for message in messages if message))
+    messages = []
+    if any("Open Library" in message for message in unique_messages):
+        messages.append(
+            "Open Library was temporarily limited, so this scan used Google Books and saved catalogue data where possible."
+        )
+    if any("Google Books" in message for message in unique_messages):
+        messages.append(
+            "Google Books was temporarily unavailable for part of this scan; cached and Open Library data filled the gap."
+        )
+    messages.extend(
+        message for message in unique_messages
+        if "Open Library" not in message and "Google Books" not in message
+    )
+    messages = messages[:3]
     set_cached(
         database_path,
         "personalised",

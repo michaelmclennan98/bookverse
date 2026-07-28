@@ -1,3 +1,12 @@
+# BookVerse v20.1
+
+- Prevents Open Library request bursts with a shared cooldown and rate limiter.
+- Uses Google Books first and Open Library only as a controlled fallback.
+- Removes repeated provider-error URLs from the interface.
+- Rejects weak niche matches such as textbooks and grammar manuals.
+- Ranks the strongest evidence first and lowers unnecessary enrichment calls.
+- Keeps manual refresh and per-profile saved recommendation sets unchanged.
+
 # BookVerse v20
 
 - Added manual Fast and Deep recommendation scans. Discover no longer starts a scan automatically.

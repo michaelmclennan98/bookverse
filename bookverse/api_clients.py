@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -112,10 +113,68 @@ class GoogleBooksClient:
 class OpenLibraryClient:
     BASE_URL = "https://openlibrary.org/search.json"
     WORK_URL = "https://openlibrary.org/works/{work_id}.json"
+    COOLDOWN_SECONDS = 180
+    TIMEOUT_COOLDOWN_SECONDS = 45
+    MIN_REQUEST_INTERVAL_SECONDS = 0.35
+    _cooldown_until = 0.0
+    _cooldown_reason = ""
+    _request_lock = threading.Lock()
+    _last_request_at = 0.0
 
     def __init__(self, contact: str, timeout: int = 15) -> None:
-        self.timeout = (3.5, max(5, min(int(timeout), 10)))
-        self.session = build_http_session(f"BookVerse/0.1 ({contact})", retries=1)
+        self.timeout = (3.0, max(4, min(int(timeout), 7)))
+        # Never retry 429 responses. Repeating a rate-limited request makes the
+        # provider block last longer and was the main cause of 60+ second scans.
+        self.session = build_http_session(f"BookVerse/0.1 ({contact})", retries=0)
+
+    @classmethod
+    def _set_cooldown(cls, seconds: int, reason: str) -> None:
+        cls._cooldown_until = max(cls._cooldown_until, time.monotonic() + max(1, seconds))
+        cls._cooldown_reason = reason
+
+    @classmethod
+    def _cooldown_message(cls) -> str:
+        return (
+            "Open Library is temporarily rate-limited. "
+            "BookVerse used Google Books and saved catalogue data instead."
+        )
+
+    def _request_json(self, url: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        cls = type(self)
+        if time.monotonic() < cls._cooldown_until:
+            raise BookAPIError(cls._cooldown_message())
+
+        # Open Library applies shared-IP limits. Serialising its requests and spacing
+        # them slightly prevents five recommendation workers from creating a burst.
+        with cls._request_lock:
+            now = time.monotonic()
+            if now < cls._cooldown_until:
+                raise BookAPIError(cls._cooldown_message())
+            wait_for = cls.MIN_REQUEST_INTERVAL_SECONDS - (now - cls._last_request_at)
+            if wait_for > 0:
+                time.sleep(wait_for)
+
+            try:
+                response = self.session.get(url, params=params, timeout=self.timeout)
+                cls._last_request_at = time.monotonic()
+                if response.status_code == 429:
+                    cls._set_cooldown(cls.COOLDOWN_SECONDS, "rate_limited")
+                    raise BookAPIError(cls._cooldown_message())
+                response.raise_for_status()
+                payload = response.json()
+            except BookAPIError:
+                raise
+            except requests.Timeout as exc:
+                cls._set_cooldown(cls.TIMEOUT_COOLDOWN_SECONDS, "timeout")
+                raise BookAPIError(
+                    "Open Library timed out. BookVerse continued with Google Books and saved data."
+                ) from exc
+            except (requests.RequestException, ValueError) as exc:
+                raise BookAPIError(
+                    "Open Library is temporarily unavailable. BookVerse continued with Google Books and saved data."
+                ) from exc
+
+        return payload if isinstance(payload, dict) else {}
 
     def search(
         self,
@@ -136,7 +195,7 @@ class OpenLibraryClient:
         params: dict[str, Any] = {
             field: query.strip(),
             "page": max(1, page),
-            "limit": max(1, min(max_results, 100)),
+            "limit": max(1, min(max_results, 60)),
             "fields": ",".join(
                 [
                     "key", "title", "subtitle", "author_name", "first_publish_year",
@@ -147,33 +206,21 @@ class OpenLibraryClient:
             ),
         }
         if language:
-            # Google Books uses two-letter language codes ("en"), while
-            # Open Library normally indexes English as the three-letter code
-            # "eng". Mapping here prevents valid English title searches from
-            # returning an empty catalogue result.
             params["language"] = "eng" if language.casefold() in {"en", "english"} else language
         if sort:
             params["sort"] = sort
-        try:
-            response = self.session.get(self.BASE_URL, params=params, timeout=self.timeout)
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError) as exc:
-            raise BookAPIError(f"Open Library request failed: {exc}") from exc
+        payload = self._request_json(self.BASE_URL, params=params)
         return [Book.from_openlibrary(doc) for doc in payload.get("docs") or []]
 
     def enrich_work(self, book: Book) -> Book:
-        """Fetch the richer Open Library work record for one search result."""
+        """Fetch a richer work record without allowing enrichment to delay a scan."""
         if book.source != "openlibrary" or not book.source_id.startswith("OL"):
             return book
         try:
-            response = self.session.get(
+            payload = self._request_json(
                 self.WORK_URL.format(work_id=book.source_id),
-                timeout=self.timeout,
             )
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError):
+        except BookAPIError:
             return book
 
         data = book.to_dict()
@@ -219,8 +266,6 @@ class BookSearchService:
         if not query:
             return SearchResponse([], ["Enter a title, author, genre, ISBN or description."])
 
-        use_google = provider in {"Both", "Google Books"} or (provider == "Auto" and self.google.enabled)
-        use_openlibrary = provider in {"Both", "Open Library"} or provider == "Auto"
         messages: list[str] = []
         books: list[Book] = []
 
@@ -247,6 +292,26 @@ class BookSearchService:
                 page=max(1, int(page_index) + 1),
             )
 
+        # Auto is deliberately Google-first. Open Library is only used when Google
+        # is unavailable or returns a thin result set. This removes unnecessary API
+        # bursts while preserving the explicit Both option for users who want it.
+        if provider == "Auto":
+            if self.google.enabled:
+                try:
+                    books.extend(google_job())
+                except BookAPIError as exc:
+                    messages.append(str(exc))
+                target = min(max(8, max_results // 3), 14)
+                if len(books) >= target:
+                    return SearchResponse(deduplicate_books(books)[:max_results], _unique(messages))
+            try:
+                books.extend(openlibrary_job())
+            except BookAPIError as exc:
+                messages.append(str(exc))
+            return SearchResponse(deduplicate_books(books)[:max_results], _unique(messages))
+
+        use_google = provider in {"Both", "Google Books"}
+        use_openlibrary = provider in {"Both", "Open Library"}
         jobs: dict[Any, str] = {}
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="bookverse-provider") as executor:
             if use_google:
@@ -263,33 +328,24 @@ class BookSearchService:
                     books.extend(future.result())
                 except BookAPIError as exc:
                     LOGGER.warning("%s error: %s", provider_name, exc)
-                    if provider == provider_name or provider_name == "Open Library":
-                        messages.append(str(exc))
+                    messages.append(str(exc))
                 except Exception as exc:
                     LOGGER.warning("%s unexpected error: %s", provider_name, type(exc).__name__)
-                    if provider == provider_name:
-                        messages.append(f"{provider_name} is temporarily unavailable.")
+                    messages.append(f"{provider_name} is temporarily unavailable.")
 
         return SearchResponse(deduplicate_books(books)[:max_results], _unique(messages))
 
 
     def enrich_seed(self, seed: Book) -> Book:
-        """Fetch richer metadata for the exact title/author before recommending."""
+        """Fetch richer metadata while avoiding an unnecessary second provider call."""
         matches: list[Book] = [seed]
         title = seed.title.strip()
         author = seed.authors[0].strip() if seed.authors else ""
 
         if self.google.enabled and title:
-            queries = [f'intitle:"{title}"' + (f' inauthor:"{author}"' if author else "")]
-            for query in queries:
-                try:
-                    matches.extend(self.google.search(query, mode="Keyword", max_results=12))
-                except BookAPIError:
-                    pass
-
-        if title:
+            query = f'intitle:"{title}"' + (f' inauthor:"{author}"' if author else "")
             try:
-                matches.extend(self.openlibrary.search(title, mode="Title", max_results=20))
+                matches.extend(self.google.search(query, mode="Keyword", max_results=12))
             except BookAPIError:
                 pass
 
@@ -298,25 +354,40 @@ class BookSearchService:
 
         seed_title = norm(seed.title)
         seed_authors = {norm(a) for a in seed.authors if a}
-        relevant: list[Book] = []
-        for book in matches:
-            bt = norm(book.title)
-            ba = {norm(a) for a in book.authors if a}
-            title_match = bt == seed_title or seed_title in bt or bt in seed_title
-            author_match = not seed_authors or bool(seed_authors & ba)
-            if title_match and author_match:
-                relevant.append(book)
+
+        def relevant_books(values: list[Book]) -> list[Book]:
+            output: list[Book] = []
+            for book in values:
+                bt = norm(book.title)
+                ba = {norm(a) for a in book.authors if a}
+                title_match = bt == seed_title or (seed_title and bt and (seed_title in bt or bt in seed_title))
+                author_match = not seed_authors or bool(seed_authors & ba)
+                if title_match and author_match:
+                    output.append(book)
+            return output
+
+        relevant = relevant_books(matches)
+        richest = max(relevant or [seed], key=lambda book: (len(book.description), len(book.categories)))
+        if title and (len(richest.description) < 100 or len(richest.categories) < 2):
+            try:
+                matches.extend(self.openlibrary.search(title, mode="Title", max_results=16))
+            except BookAPIError:
+                pass
+            relevant = relevant_books(matches)
 
         if not relevant:
             return seed
-        # Search records often contain only a first sentence. Fetch at most two exact
-        # Open Library work records to recover a full description and subjects.
+
         hydrated: list[Book] = []
-        fetched = 0
+        hydrated_one = False
         for book in relevant:
-            if book.source == "openlibrary" and fetched < 2:
+            if (
+                book.source == "openlibrary"
+                and not hydrated_one
+                and (len(book.description) < 100 or len(book.categories) < 2)
+            ):
                 hydrated.append(self.openlibrary.enrich_work(book))
-                fetched += 1
+                hydrated_one = True
             else:
                 hydrated.append(book)
         return merge_book_records(hydrated)
@@ -335,13 +406,15 @@ class BookSearchService:
             return [], ""
 
         works: list[Book] = []
-        try:
-            works.extend(self.openlibrary.search(author, mode="Author", max_results=45))
-        except BookAPIError:
-            pass
         if self.google.enabled:
             try:
                 works.extend(self.google.search(author, mode="Author", max_results=20))
+            except BookAPIError:
+                pass
+        # Open Library is a fallback here, not a compulsory second call.
+        if len(works) < 8:
+            try:
+                works.extend(self.openlibrary.search(author, mode="Author", max_results=24))
             except BookAPIError:
                 pass
         works = deduplicate_books(works)[:30]
@@ -426,7 +499,7 @@ class BookSearchService:
         ][:5]
         return categories[:28], " ".join(selected_descriptions)[:3500]
 
-    def prepare_recommendation_seed(self, seed: Book) -> Book:
+    def prepare_recommendation_seed(self, seed: Book, scan_mode: str = "Fast") -> Book:
         """Enrich an exact edition and cautiously fill sparse metadata from its author."""
         if seed.source == "bookverse":
             return seed
@@ -446,7 +519,10 @@ class BookSearchService:
                 and (len(enriched.description) < 500 or len(meaningful_categories) < 4)
             )
         )
-        if not needs_author_context:
+        mode = "Deep" if str(scan_mode).casefold() == "deep" else "Fast"
+        # Fast mode stays fast: author-wide catalogue research is reserved for Deep
+        # scans unless the seed has almost no usable identity at all.
+        if not needs_author_context or (mode == "Fast" and profile.confidence >= 0.25):
             return enriched
 
         author_categories, author_text = self.author_profile(enriched)
@@ -496,7 +572,14 @@ class BookSearchService:
 
         hydrate_ids: set[str] = set()
         for _score, book in scored:
-            if book.source == "openlibrary":
+            meaningful_categories = [
+                value for value in book.categories
+                if value.casefold().strip() not in GENERIC_CATEGORIES
+            ]
+            if (
+                book.source == "openlibrary"
+                and (len(book.description) < 120 or len(meaningful_categories) < 2)
+            ):
                 hydrate_ids.add(book.uid)
                 if len(hydrate_ids) >= max(0, int(limit)):
                     break
@@ -510,7 +593,7 @@ class BookSearchService:
             def hydrate(book: Book) -> Book:
                 client = OpenLibraryClient("bookverse-parallel@example.invalid", timeout=8)
                 return client.enrich_work(book)
-            with ThreadPoolExecutor(max_workers=min(5, len(hydrate_books)), thread_name_prefix="bookverse-detail") as executor:
+            with ThreadPoolExecutor(max_workers=min(2, len(hydrate_books)), thread_name_prefix="bookverse-detail") as executor:
                 future_map = {executor.submit(hydrate, book): book for book in hydrate_books}
                 for future in as_completed(future_map):
                     original = future_map[future]
@@ -530,33 +613,22 @@ class BookSearchService:
         max_results: int = 160,
         scan_mode: str = "Deep",
     ) -> SearchResponse:
-        """Build a broad candidate pool, then let the recommender enforce precision.
-
-        Queries are generated from the seed's strongest subgenres, genres, themes,
-        tones and weighted metadata. This works across fiction and nonfiction rather
-        than relying on special cases for one author or one genre.
-        """
+        """Build a precise pool without flooding either catalogue provider."""
         mode = "Deep" if str(scan_mode).casefold() == "deep" else "Fast"
-        query_limit = 7 if mode == "Deep" else 4
-        google_query_limit = 3 if mode == "Deep" else 1
-        search_terms = profile_search_terms(seed, limit=10 if mode == "Deep" else 6)
+        google_query_limit = 3 if mode == "Deep" else 2
+        openlibrary_query_limit = 2 if mode == "Deep" else 1
+        search_terms = profile_search_terms(seed, limit=8 if mode == "Deep" else 5)
         profile = profile_book(seed)
-        # The current app is English-first. Provider-level language constraints
-        # reduce irrelevant editions before the local language validator runs.
-        google_language = "en"
-        openlibrary_language = "eng"
         messages: list[str] = []
         all_books: list[Book] = []
-
         query_plan: list[tuple[str, SearchMode]] = []
 
-        def add_query(query: str, mode: SearchMode = "Keyword") -> None:
+        def add_query(query: str, query_mode: SearchMode = "Keyword") -> None:
             query = query.strip()
-            key = (query.casefold(), mode)
+            key = (query.casefold(), query_mode)
             if query and key not in {(q.casefold(), m) for q, m in query_plan}:
-                query_plan.append((query, mode))
+                query_plan.append((query, query_mode))
 
-        # Specific combinations find niche matches; individual terms preserve recall.
         specific = [value.replace("_", " ") for value in sorted(profile.subgenres)]
         themes = [
             value.replace("_", " ")
@@ -580,69 +652,59 @@ class BookSearchService:
             else "mature" if profile.content_level == "mature"
             else ""
         )
+
         if specific:
             add_query(" ".join(value for value in [specific[0], work_type, audience, content_term, *(themes[:1] or tones[:1])] if value))
         if genres and themes:
-            add_query(" ".join(value for value in [genres[0], work_type, themes[0]] if value))
+            add_query(" ".join(value for value in [genres[0], work_type, themes[0], audience] if value))
         if genres and tones:
             add_query(" ".join(value for value in [genres[0], work_type, tones[0]] if value))
-        if genres and work_type:
-            add_query(" ".join(value for value in [genres[0], work_type, audience, content_term] if value))
-        for value in specific[:3]:
+        for value in specific[:2]:
             add_query(value, "Genre / subject")
+        for value in search_terms[:3]:
             add_query(value, "Keyword")
-        for value in genres[:3]:
-            add_query(value, "Genre / subject")
-        for value in search_terms[:5]:
-            add_query(value, "Keyword")
-
-        # A sparse book can still surface its author's nearby works and improve recall.
-        if seed.authors:
+        if seed.authors and mode == "Deep":
             add_query(seed.authors[0], "Author")
         if not query_plan:
             add_query(seed.title, "Title")
 
-        # Run the independent provider searches concurrently. Each worker owns its
-        # own HTTP session, which avoids sharing requests.Session across threads.
-        jobs: list[tuple[str, str, SearchMode]] = []
-        for query, query_mode in query_plan[:query_limit]:
-            jobs.append(("openlibrary", query, query_mode))
-        if self.google.enabled:
-            google_queries = [item for item in query_plan if item[1] != "Author"][:google_query_limit]
-            for query, query_mode in google_queries:
-                jobs.append(("google", query, query_mode))
+        google_queries = [item for item in query_plan if item[1] != "Author"][:google_query_limit]
 
-        def run_job(job: tuple[str, str, SearchMode]) -> list[Book]:
-            provider_name, query, query_mode = job
-            if provider_name == "google":
-                client = GoogleBooksClient(self.google.api_key, timeout=8)
-                return client.search(
-                    query,
-                    mode=query_mode,
-                    max_results=20,
-                    language=google_language,
-                )
-            client = OpenLibraryClient("bookverse-parallel@example.invalid", timeout=8)
-            return client.search(
-                query,
-                mode=query_mode,
-                max_results=36 if mode == "Deep" else 24,
-                language=openlibrary_language,
-            )
+        def google_job(item: tuple[str, SearchMode]) -> list[Book]:
+            query, query_mode = item
+            client = GoogleBooksClient(self.google.api_key, timeout=7)
+            return client.search(query, mode=query_mode, max_results=20, language="en")
 
-        with ThreadPoolExecutor(max_workers=min(5, max(1, len(jobs))), thread_name_prefix="bookverse-candidate") as executor:
-            future_map = {executor.submit(run_job, job): job for job in jobs}
-            for future in as_completed(future_map):
-                provider_name, _query, _query_mode = future_map[future]
+        if self.google.enabled and google_queries:
+            with ThreadPoolExecutor(max_workers=min(3, len(google_queries)), thread_name_prefix="bookverse-google-candidate") as executor:
+                future_map = {executor.submit(google_job, item): item for item in google_queries}
+                for future in as_completed(future_map):
+                    try:
+                        all_books.extend(future.result())
+                    except BookAPIError as exc:
+                        if str(exc) not in messages:
+                            messages.append(str(exc))
+
+        # Only fall back to Open Library when Google did not produce a healthy pool.
+        minimum_google_pool = 34 if mode == "Deep" else 18
+        should_use_openlibrary = not self.google.enabled or len(deduplicate_books(all_books)) < minimum_google_pool
+        if should_use_openlibrary:
+            for query, query_mode in query_plan[:openlibrary_query_limit]:
                 try:
-                    all_books.extend(future.result())
+                    all_books.extend(
+                        self.openlibrary.search(
+                            query,
+                            mode=query_mode,
+                            max_results=28 if mode == "Deep" else 20,
+                            language="eng",
+                        )
+                    )
                 except BookAPIError as exc:
-                    if provider_name == "openlibrary":
+                    if str(exc) not in messages:
                         messages.append(str(exc))
-                    else:
-                        LOGGER.warning("Recommendation Google Books error: %s", exc)
-                except Exception as exc:
-                    LOGGER.warning("Recommendation provider error: %s", type(exc).__name__)
+                    # A cooldown is shared across all workers, so continuing would
+                    # only create duplicate warnings and wasted calls.
+                    break
 
         deduplicated = deduplicate_books(all_books)
         english_candidates = [
@@ -650,6 +712,8 @@ class BookSearchService:
             if is_english_book(book, allow_unknown=True)
         ]
         return SearchResponse(english_candidates[:max_results], _unique(messages))
+
+
 
 
 
