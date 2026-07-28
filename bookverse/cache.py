@@ -14,6 +14,7 @@ from .recommendation_intelligence import (
     feedback_adjustment,
     final_match_percent,
     normalise_rules,
+    recommendation_evidence_strength,
     rule_rejections,
     score_breakdown,
     select_diverse_records,
@@ -24,6 +25,7 @@ from .smart_search import parse_smart_query
 SEARCH_TTL = 60 * 60 * 24 * 7
 DETAIL_TTL = 60 * 60 * 24 * 30
 RECOMMENDATION_TTL = 60 * 60 * 24 * 7
+SEED_POOL_TTL = 60 * 60 * 24 * 7
 
 
 def _normalise(value: str) -> str:
@@ -311,8 +313,8 @@ def cached_personalised(
     # One shared budget applies to every worker in the scan. The provider clients
     # refuse further requests once the cap is reached and rank what is already held.
     request_budget = RequestBudget(
-        max_google=18 if mode == "Deep" else 10,
-        max_openlibrary=7 if mode == "Deep" else 3,
+        max_google=30 if mode == "Deep" else 18,
+        max_openlibrary=4 if mode == "Deep" else 2,
     )
 
     scan_stats: dict[str, int] = {
@@ -327,49 +329,92 @@ def cached_personalised(
 
     def scan_seed(item: tuple[float, Book]) -> tuple[float, Book, list[Any], list[str]]:
         weight, seed = item
-        service = BookSearchService(
-            google_api_key,
-            open_library_contact,
-            timeout,
-            request_budget=request_budget,
+        seed_cache_parts = (
+            seed.uid,
+            seed.to_dict(),
+            mode,
+            bool(google_api_key),
+            "v21.1-seed-candidate-pool",
         )
-        try:
-            enriched_seed = service.prepare_recommendation_seed(seed, scan_mode=mode)
-        except TypeError:
-            enriched_seed = service.prepare_recommendation_seed(seed)
-        try:
-            response = service.recommendation_candidates(
-                enriched_seed,
-                max_results=90 if mode == "Deep" else 55,
-                scan_mode=mode,
+        cached_pool = get_cached(database_path, "recommendation-seed-pool", *seed_cache_parts)
+        provider_messages: list[str] = []
+
+        if isinstance(cached_pool, dict) and cached_pool.get("candidates"):
+            enriched_seed = Book.from_dict(cached_pool.get("seed") or seed.to_dict())
+            candidates = [
+                Book.from_dict(payload)
+                for payload in cached_pool.get("candidates") or []
+            ]
+        else:
+            service = BookSearchService(
+                google_api_key,
+                open_library_contact,
+                timeout,
+                request_budget=request_budget,
             )
-        except TypeError:
-            response = service.recommendation_candidates(
-                enriched_seed,
-                max_results=90 if mode == "Deep" else 55,
-            )
-        try:
-            candidates = service.enrich_recommendation_candidates(
-                enriched_seed,
-                response.books,
-                limit=4 if mode == "Deep" else 1,
-                parallel=True,
-            )
-        except TypeError:
-            candidates = service.enrich_recommendation_candidates(
-                enriched_seed,
-                response.books,
-                limit=4 if mode == "Deep" else 1,
-            )
+            try:
+                enriched_seed = service.prepare_recommendation_seed(seed, scan_mode=mode)
+            except TypeError:
+                enriched_seed = service.prepare_recommendation_seed(seed)
+            try:
+                response = service.recommendation_candidates(
+                    enriched_seed,
+                    max_results=80 if mode == "Deep" else 50,
+                    scan_mode=mode,
+                )
+            except TypeError:
+                response = service.recommendation_candidates(
+                    enriched_seed,
+                    max_results=80 if mode == "Deep" else 50,
+                )
+            provider_messages = list(response.provider_messages)
+            try:
+                candidates = service.enrich_recommendation_candidates(
+                    enriched_seed,
+                    response.books,
+                    limit=3 if mode == "Deep" else 1,
+                    parallel=True,
+                )
+            except TypeError:
+                candidates = service.enrich_recommendation_candidates(
+                    enriched_seed,
+                    response.books,
+                    limit=3 if mode == "Deep" else 1,
+                )
+
+            # Never cache an outage as an empty candidate pool. A successful pool is
+            # reusable for seven days, so repeat refreshes rerank locally instead of
+            # hitting both providers again.
+            if candidates:
+                set_cached(
+                    database_path,
+                    "recommendation-seed-pool",
+                    seed_cache_parts,
+                    {
+                        "seed": enriched_seed.to_dict(),
+                        "candidates": [book.to_dict() for book in candidates],
+                    },
+                    SEED_POOL_TTL,
+                )
+
         ranked = rank_similar_detailed(
             enriched_seed,
             candidates,
-            limit=11 if mode == "Deep" else 8,
+            limit=18 if mode == "Deep" else 12,
         )
-        return weight, seed, ranked, response.provider_messages
+        return weight, seed, ranked, provider_messages
 
     aggregates: dict[str, dict[str, Any]] = {}
     messages: list[str] = []
+
+    def has_defensible_match(seed: Book, result: Any) -> bool:
+        evidence = recommendation_evidence_strength(seed, result.book)
+        score = float(result.score)
+        percent = int(result.match_percent)
+        return (
+            (percent >= 58 and score >= 0.12 and evidence >= 2)
+            or (percent >= 54 and score >= 0.10 and evidence >= 4)
+        )
 
     workers = min(3 if mode == "Deep" else 2, len(weighted_seeds))
     with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="bookverse-seed") as executor:
@@ -383,10 +428,10 @@ def cached_personalised(
             messages.extend(provider_messages)
             for result in ranked:
                 scan_stats["candidate_rows"] += 1
-                if float(result.score) < 0.13 or int(result.match_percent) < 58:
+                book = result.book
+                if not has_defensible_match(seed, result):
                     scan_stats["weak_match_removed"] += 1
                     continue
-                book = result.book
                 identity = _identity(book)
                 if book.uid in saved_uids or identity in saved_identities:
                     scan_stats["saved_or_duplicate_removed"] += 1
@@ -490,6 +535,7 @@ def cached_personalised(
                         continue
 
                     best_result = None
+                    best_seed = None
                     for _seed_weight, seed_book in weighted_seeds:
                         ranked_one = rank_similar_detailed(seed_book, [book], limit=1)
                         if ranked_one and (
@@ -497,7 +543,12 @@ def cached_personalised(
                             or float(ranked_one[0].score) > float(best_result.score)
                         ):
                             best_result = ranked_one[0]
-                    if best_result is None or float(best_result.score) < 0.13 or int(best_result.match_percent) < 58:
+                            best_seed = seed_book
+                    if (
+                        best_result is None
+                        or best_seed is None
+                        or not has_defensible_match(best_seed, best_result)
+                    ):
                         scan_stats["weak_match_removed"] += 1
                         continue
 
@@ -585,19 +636,31 @@ def cached_personalised(
 
     unique_messages = list(dict.fromkeys(message for message in messages if message))
     messages = []
-    if any("Open Library" in message for message in unique_messages):
+    openlibrary_problem = any(
+        "Open Library" in message
+        and "budget reached" not in message.casefold()
+        for message in unique_messages
+    )
+    google_problem = any(
+        "Google Books" in message
+        and "budget reached" not in message.casefold()
+        for message in unique_messages
+    )
+    if openlibrary_problem:
         messages.append(
-            "Open Library was limited or reached its scan budget. BookVerse completed the scan with Google Books and saved catalogue data."
+            "Open Library was temporarily limited. BookVerse continued with Google Books and saved seed pools."
         )
-    if any("Google Books" in message for message in unique_messages):
+    if google_problem:
         messages.append(
-            "Google Books was unavailable or reached its scan budget during part of this scan."
+            "One or more Google Books searches failed, but completed searches and saved seed pools were still ranked."
         )
     messages.extend(
         message for message in unique_messages
-        if "Open Library" not in message and "Google Books" not in message
+        if "Open Library" not in message
+        and "Google Books" not in message
+        and "budget reached" not in message.casefold()
     )
-    messages = messages[:3]
+    messages = messages[:2]
     set_cached(
         database_path,
         "personalised",

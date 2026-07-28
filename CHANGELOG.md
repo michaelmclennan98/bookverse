@@ -1,3 +1,15 @@
+# BookVerse v21.1
+
+- Fixed recommendation refreshes returning no usable matches after the v21 request-budget changes.
+- Added seven-day per-seed candidate pools so repeat scans rerank saved catalogue data instead of repeating provider calls.
+- Increased the Google-first scan budget while reducing wasteful author-wide and duplicate catalogue searches.
+- Stopped one transient Google timeout or 5xx response from placing every recommendation worker into a global cooldown.
+- Refilters every saved recommendation set against the current hard rules before it is displayed.
+- Automatically hides legacy recommendations with missing descriptions, excluded work types, wrong languages or other rule violations.
+- Preserves the last valid set when providers are unavailable without showing duplicated or contradictory provider warnings.
+- Added stronger Book DNA evidence checks to reject broad keyword-only matches while retaining genuine adjacent recommendations.
+- Preserved manual scans, profile-specific saved results, Supabase data, v21 settings and all existing features.
+
 # BookVerse v21
 
 - Added profile-specific hard recommendation rules for language, audience, descriptions, ratings, length, publication years, series status and excluded book types.

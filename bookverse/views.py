@@ -40,6 +40,7 @@ from .persistent_cache import cache_stats
 from .recommendation_intelligence import (
     RULES_SETTING_KEY,
     book_dna,
+    filter_recommendation_payloads,
     normalise_rules,
     rules_summary,
 )
@@ -1151,12 +1152,19 @@ def _render_personalised_section(
 
     saved_key = "personalised_last_results_v21"
     legacy_saved_key = "personalised_last_results_v20"
+    rules = normalise_rules(db.get_setting(RULES_SETTING_KEY, ""))
+
     if "personalised_results" not in st.session_state:
         saved_value = db.get_setting(saved_key, "") or db.get_setting(legacy_saved_key, "")
         if saved_value:
             try:
                 saved_payload = json.loads(saved_value)
-                st.session_state.personalised_results = list(saved_payload.get("results") or [])
+                restored_payloads, hidden_count = filter_recommendation_payloads(
+                    list(saved_payload.get("results") or []),
+                    rules,
+                )
+                st.session_state.personalised_results = restored_payloads
+                st.session_state.personalised_hidden_by_rules = hidden_count
                 st.session_state.personalised_messages = list(saved_payload.get("messages") or [])
                 st.session_state.personalised_scan_mode = str(saved_payload.get("mode") or "Fast")
                 st.session_state.personalised_generated_at = str(saved_payload.get("generated_at") or "")
@@ -1166,21 +1174,27 @@ def _render_personalised_section(
             except (TypeError, ValueError, json.JSONDecodeError):
                 st.session_state.personalised_results = []
 
-    payloads = list(st.session_state.get("personalised_results") or [])
+    current_payloads = list(st.session_state.get("personalised_results") or [])
+    payloads, newly_hidden = filter_recommendation_payloads(current_payloads, rules)
+    if newly_hidden:
+        st.session_state.personalised_results = payloads
+        st.session_state.personalised_hidden_by_rules = (
+            int(st.session_state.get("personalised_hidden_by_rules", 0))
+            + newly_hidden
+        )
+
     refresh_token = int(st.session_state.get("personalised_refresh_token", 0))
     current_mode = str(st.session_state.get("personalised_scan_mode", "Fast"))
     if current_mode not in {"Fast", "Deep"}:
         current_mode = "Fast"
-
-    rules = normalise_rules(db.get_setting(RULES_SETTING_KEY, ""))
     control1, control2, control3 = st.columns([1.25, 1.15, 1.6], vertical_alignment="bottom")
     scan_mode = control1.selectbox(
         "Recommendation scan",
         ("Fast", "Deep"),
         index=0 if current_mode == "Fast" else 1,
         help=(
-            "Fast uses the strongest 3 books with a 13-request provider budget. "
-            "Deep uses the strongest 5 books with a 25-request provider budget."
+            "Fast uses the strongest 3 books and reuses saved seed pools whenever possible. "
+            "Deep uses the strongest 5 with a larger Google-first request budget."
         ),
         key="personalised_scan_mode_selector",
     )
@@ -1205,6 +1219,16 @@ def _render_personalised_section(
     active_rule_labels = rules_summary(rules)
     if active_rule_labels:
         st.caption("Active rules: " + " · ".join(active_rule_labels))
+
+    hidden_by_rules = int(st.session_state.get("personalised_hidden_by_rules", 0))
+    if hidden_by_rules:
+        st.info(
+            f"{hidden_by_rules} older saved recommendation"
+            f"{'s were' if hidden_by_rules != 1 else ' was'} hidden because "
+            "they no longer satisfy the active rules. They will not reappear unless the rules change."
+        )
+
+    show_saved_messages = True
 
     if scan_requested:
         old_payloads = payloads
@@ -1239,7 +1263,7 @@ def _render_personalised_section(
                 settings.open_library_contact,
                 settings.request_timeout_seconds,
                 24 if scan_mode == "Deep" else 18,
-                engine_version="v21-recommendation-intelligence",
+                engine_version="v21.1-recovery-safe-intelligence",
                 refresh_token=next_token,
                 scan_mode=scan_mode,
                 database_path=str(settings.database_path),
@@ -1254,6 +1278,7 @@ def _render_personalised_section(
         duration = time.perf_counter() - started
         after_cache = cache_stats(settings.database_path)
         cache_hits = max(0, int(after_cache.get("hits", 0)) - int(before_cache.get("hits", 0)))
+        new_payloads, _invalid_new = filter_recommendation_payloads(new_payloads, rules)
 
         if new_payloads:
             generated_at = datetime.now().isoformat(timespec="seconds")
@@ -1269,6 +1294,7 @@ def _render_personalised_section(
             st.session_state.personalised_generated_at = generated_at
             st.session_state.personalised_total_books_at_scan = len(entries)
             st.session_state.personalised_scan_report = scan_report
+            st.session_state.personalised_hidden_by_rules = 0
             db.set_setting(
                 saved_key,
                 json.dumps(
@@ -1307,19 +1333,24 @@ def _render_personalised_section(
             st.session_state.personalised_results = old_payloads
             st.session_state.personalised_messages = old_messages
             st.session_state.personalised_scan_report = old_report
+            show_saved_messages = False
             if old_payloads:
-                st.warning("The new scan returned no usable matches, so the previous saved set has been kept.")
+                st.warning(
+                    "The providers did not return enough new rule-compliant books. "
+                    "The last valid set is still shown and nothing in your library was changed."
+                )
             else:
-                st.warning("No usable recommendations were returned. Your library was not changed.")
-            for message in messages:
-                st.caption(message)
+                st.warning(
+                    "The providers did not return enough rule-compliant books this time. "
+                    "Nothing was saved or removed; press Build recommendations again later."
+                )
 
     saved_messages = [
         str(message) for message in st.session_state.get("personalised_messages", [])
         if str(message).strip()
     ]
-    for message in list(dict.fromkeys(saved_messages))[:3]:
-        st.caption(message)
+    if show_saved_messages and saved_messages:
+        st.caption(list(dict.fromkeys(saved_messages))[0])
     payloads = list(st.session_state.get("personalised_results") or [])
 
     if st.session_state.get("personalised_dirty") and payloads:

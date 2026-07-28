@@ -98,16 +98,16 @@ def build_http_session(user_agent: str, retries: int = 1) -> requests.Session:
 
 class GoogleBooksClient:
     BASE_URL = "https://www.googleapis.com/books/v1/volumes"
-    COOLDOWN_SECONDS = 180
+    COOLDOWN_SECONDS = 90
     _cooldown_until = 0.0
 
     def __init__(self, api_key: str, timeout: int = 15, request_budget: RequestBudget | None = None) -> None:
         self.api_key = api_key.strip()
         self.request_budget = request_budget
         self.timeout = (3.5, max(5, min(int(timeout), 10)))
-        # Google occasionally returns bursts of 503 responses. Keep retries low and
-        # temporarily pause further Google calls so Open Library can take over quickly.
-        self.session = build_http_session("BookVerse/0.1 GoogleBooksClient", retries=1)
+        # Avoid long retry chains. A single failed Google request must not freeze the
+        # whole recommendation scan or put every worker into a three-minute cooldown.
+        self.session = build_http_session("BookVerse/0.1 GoogleBooksClient", retries=0)
 
     @property
     def enabled(self) -> bool:
@@ -152,17 +152,28 @@ class GoogleBooksClient:
             params["filter"] = ebook_filter
         try:
             response = self.session.get(self.BASE_URL, params=params, timeout=self.timeout)
+            if response.status_code in {429, 403}:
+                type(self)._cooldown_until = time.monotonic() + self.COOLDOWN_SECONDS
+                raise BookAPIError(
+                    "Google Books is temporarily rate-limited. BookVerse used saved catalogue data and Open Library instead."
+                )
             response.raise_for_status()
             payload = response.json()
             if self.request_budget is not None:
                 self.request_budget.mark_success("google")
+        except BookAPIError:
+            if self.request_budget is not None:
+                self.request_budget.mark_error("google")
+            raise
         except (requests.RequestException, ValueError) as exc:
             if self.request_budget is not None:
                 self.request_budget.mark_error("google")
-            type(self)._cooldown_until = time.monotonic() + self.COOLDOWN_SECONDS
-            LOGGER.warning("Google Books temporarily unavailable: %s", type(exc).__name__)
-            # Never include the request URL because it contains the API key.
-            raise BookAPIError("Google Books is temporarily unavailable. Open Library results are being used.") from exc
+            LOGGER.warning("Google Books request failed without global cooldown: %s", type(exc).__name__)
+            # Transient timeouts and 5xx responses affect only this request. Other
+            # workers are still allowed to finish, which prevents an empty scan.
+            raise BookAPIError(
+                "One Google Books request failed. BookVerse continued with the other completed searches."
+            ) from exc
         return [Book.from_google(item) for item in payload.get("items") or []]
 
 
@@ -577,21 +588,17 @@ class BookSearchService:
         meaningful_categories = [
             c for c in enriched.categories if c.casefold().strip() not in GENERIC_CATEGORIES
         ]
-        needs_author_context = (
-            profile.confidence < 0.62
-            or len(enriched.description) < 100
-            or len(meaningful_categories) < 2
-            or (
-                "horror" in profile.genres
-                and "adult" not in profile.target_audiences
-                and profile.content_level_value <= 2
-                and (len(enriched.description) < 500 or len(meaningful_categories) < 4)
-            )
-        )
         mode = "Deep" if str(scan_mode).casefold() == "deep" else "Fast"
-        # Fast mode stays fast: author-wide catalogue research is reserved for Deep
-        # scans unless the seed has almost no usable identity at all.
-        if not needs_author_context or (mode == "Fast" and profile.confidence >= 0.25):
+        # Author-wide research is expensive and previously consumed the shared
+        # Google budget before candidate searches began. Reserve it for genuinely
+        # unusable seeds only. Normal sparse editions are still enriched exactly.
+        needs_author_context = (
+            mode == "Deep"
+            and profile.confidence < 0.20
+            and len(enriched.description) < 60
+            and len(meaningful_categories) < 1
+        )
+        if not needs_author_context:
             return enriched
 
         author_categories, author_text = self.author_profile(enriched)
@@ -688,8 +695,8 @@ class BookSearchService:
     ) -> SearchResponse:
         """Build a precise pool without flooding either catalogue provider."""
         mode = "Deep" if str(scan_mode).casefold() == "deep" else "Fast"
-        google_query_limit = 3 if mode == "Deep" else 2
-        openlibrary_query_limit = 2 if mode == "Deep" else 1
+        google_query_limit = 2
+        openlibrary_query_limit = 1
         search_terms = profile_search_terms(seed, limit=8 if mode == "Deep" else 5)
         profile = profile_book(seed)
         messages: list[str] = []
@@ -763,7 +770,7 @@ class BookSearchService:
                             messages.append(str(exc))
 
         # Only fall back to Open Library when Google did not produce a healthy pool.
-        minimum_google_pool = 34 if mode == "Deep" else 18
+        minimum_google_pool = 24 if mode == "Deep" else 16
         should_use_openlibrary = not self.google.enabled or len(deduplicate_books(all_books)) < minimum_google_pool
         if should_use_openlibrary:
             for query, query_mode in query_plan[:openlibrary_query_limit]:

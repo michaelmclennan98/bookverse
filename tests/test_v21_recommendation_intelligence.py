@@ -6,6 +6,7 @@ from bookverse.models import Book
 from bookverse.recommendation_intelligence import (
     DEFAULT_RULES,
     book_dna,
+    filter_recommendation_payloads,
     normalise_rules,
     rule_rejections,
     select_diverse_records,
@@ -69,6 +70,25 @@ def test_hard_rules_reject_textbooks_and_missing_descriptions() -> None:
     allowed = normalise_rules({**DEFAULT_RULES, "exclude_textbooks": False, "require_description": False})
     assert not rule_rejections(textbook, allowed)
 
+
+
+def test_saved_recommendations_are_refiltered_when_rules_change() -> None:
+    valid = _book("valid", "Valid Horror", "A. Writer")
+    missing_description = _book("missing", "Missing", "B. Writer", description="")
+    textbook = _book(
+        "textbook-old",
+        "English Grammar and Composition",
+        "J. Teacher",
+        categories=("English language", "Grammar", "Textbook"),
+    )
+    payloads = [
+        {"book": valid.to_dict(), "match_percent": 80},
+        {"book": missing_description.to_dict(), "match_percent": 80},
+        {"book": textbook.to_dict(), "match_percent": 80},
+    ]
+    filtered, hidden = filter_recommendation_payloads(payloads, DEFAULT_RULES)
+    assert hidden == 2
+    assert [item["book"]["source_id"] for item in filtered] == ["valid"]
 
 def test_book_dna_extracts_intensity_romance_and_pace() -> None:
     book = _book(
@@ -147,6 +167,7 @@ def test_v21_ui_and_saved_state_are_wired() -> None:
     assert "recommendation_payloads" in views
     assert "rules_payload=rules" in views
     assert "RequestBudget" in cache
+    assert "recommendation-seed-pool" in cache
     assert "scan_report" in cache
     assert "render_recommendation_preferences" in features
     assert "Choose My Next Book" in features

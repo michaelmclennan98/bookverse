@@ -188,6 +188,71 @@ def rule_rejections(book: Book, payload: dict[str, Any] | str | None) -> list[st
     return reasons
 
 
+
+def filter_recommendation_payloads(
+    payloads: Iterable[dict[str, Any]],
+    rules_payload: dict[str, Any] | str | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return only saved recommendations that still satisfy the active rules.
+
+    Saved recommendation sets can outlive a deployment or a later rule change.
+    Filtering them at display time prevents an older result with no description,
+    the wrong language or an excluded work type from remaining visible merely
+    because a replacement scan was temporarily unavailable.
+    """
+    allowed: list[dict[str, Any]] = []
+    hidden = 0
+    seen: set[str] = set()
+
+    for payload in payloads:
+        try:
+            book = Book.from_dict(payload.get("book") or payload)
+        except (TypeError, ValueError, KeyError):
+            hidden += 1
+            continue
+
+        if book.uid in seen:
+            hidden += 1
+            continue
+        seen.add(book.uid)
+
+        if rule_rejections(book, rules_payload):
+            hidden += 1
+            continue
+
+        allowed.append(dict(payload))
+
+    return allowed, hidden
+
+
+def recommendation_evidence_strength(seed: Book, candidate: Book) -> int:
+    """Count meaningful Book DNA overlaps while ignoring broad catalogue labels."""
+    seed_profile = profile_book(seed)
+    candidate_profile = profile_book(candidate)
+
+    generic_genres = {
+        "fiction", "nonfiction", "literature", "general", "history",
+        "novel", "stories", "adult",
+    }
+    genre_overlap = (seed_profile.genres & candidate_profile.genres) - generic_genres
+    subgenre_overlap = seed_profile.subgenres & candidate_profile.subgenres
+    theme_overlap = seed_profile.themes & candidate_profile.themes
+    tone_overlap = seed_profile.tones & candidate_profile.tones
+
+    strength = 0
+    strength += min(3, len(subgenre_overlap)) * 3
+    strength += min(3, len(genre_overlap)) * 2
+    strength += min(3, len(theme_overlap)) * 2
+    strength += min(2, len(tone_overlap))
+
+    if (
+        seed_profile.primary_work_type == candidate_profile.primary_work_type
+        and seed_profile.primary_work_type not in {"unknown", "general_fiction"}
+    ):
+        strength += 1
+
+    return strength
+
 def feedback_adjustment(book: Book, feedback_values: set[str]) -> tuple[float, list[str]]:
     dna = book_dna(book)
     multiplier = 1.0
