@@ -1,3 +1,16 @@
+# BookVerse v21.2
+
+- Fixed failed recommendation attempts being cached as empty results, which prevented later refreshes from running properly.
+- Added a unique manual scan-attempt token so every button press can retry providers while completed recommendation sets remain versioned separately.
+- Split seed preparation, candidate discovery and metadata repair into independent request budgets so description repair cannot starve the actual search stage.
+- Added a profile-wide second search stage built from the strongest saved-book DNA and specific favourite niches.
+- Added exact Google title-and-author metadata repair before English and description rules are enforced, with a bounded Open Library fallback.
+- Increased precise Google candidate queries while retaining strict Open Library rate-limit protection.
+- Added stronger textbook, workbook, grammar, study-guide and reference-work rejection.
+- Prevented a weak partial refresh from replacing a larger valid saved set.
+- Kept all recommendation scans manual and preserved the last valid profile-specific set until a better completed set is available.
+- Added four v21.2 regression tests; 71 automated tests pass.
+
 # BookVerse v21.1
 
 - Fixed recommendation refreshes returning no usable matches after the v21 request-budget changes.

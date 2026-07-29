@@ -165,9 +165,25 @@ def rule_rejections(book: Book, payload: dict[str, Any] | str | None) -> list[st
     if rules["standalone_only"] and _series_status(book) in {"series", "series_start", "later_series"}:
         reasons.append("appears to be part of a series")
 
-    if rules["exclude_textbooks"] and profile.primary_work_type in {"textbook", "academic_criticism"}:
+    textbook_markers = (
+        "textbook", "workbook", "coursebook", "student edition", "teacher edition",
+        "study guide", "study aids", "curriculum", "teaching resource",
+        "problems, exercises", "composition and exercises", "grammar and composition",
+        "literary criticism", "criticism and interpretation",
+    )
+    reference_markers = (
+        "reference work", "handbook", "manual", "encyclopedia", "dictionary of",
+        "instructional guide", "how-to guide", "guidebook",
+    )
+    if rules["exclude_textbooks"] and (
+        profile.primary_work_type in {"textbook", "academic_criticism"}
+        or any(marker in text for marker in textbook_markers)
+    ):
         reasons.append("textbook or academic work")
-    if rules["exclude_reference"] and profile.primary_work_type in {"reference", "manual", "guidebook", "cookbook"}:
+    if rules["exclude_reference"] and (
+        profile.primary_work_type in {"reference", "manual", "guidebook", "cookbook"}
+        or any(marker in text for marker in reference_markers)
+    ):
         reasons.append("reference or instructional work")
     if rules["exclude_poetry"] and profile.primary_work_type == "poetry":
         reasons.append("poetry excluded")

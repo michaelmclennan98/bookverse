@@ -1235,6 +1235,8 @@ def _render_personalised_section(
         old_messages = list(st.session_state.get("personalised_messages") or [])
         old_report = dict(st.session_state.get("personalised_scan_report") or {})
         next_token = refresh_token + 1
+        attempt_token = int(st.session_state.get("personalised_scan_attempt_token", 0)) + 1
+        st.session_state.personalised_scan_attempt_token = attempt_token
         entry_payloads = [
             {
                 "book": entry["book"].to_dict(),
@@ -1263,12 +1265,13 @@ def _render_personalised_section(
                 settings.open_library_contact,
                 settings.request_timeout_seconds,
                 24 if scan_mode == "Deep" else 18,
-                engine_version="v21.1-recovery-safe-intelligence",
+                engine_version="v21.2-staged-description-repair",
                 refresh_token=next_token,
                 scan_mode=scan_mode,
                 database_path=str(settings.database_path),
                 feedback_payload=feedback,
                 rules_payload=rules,
+                attempt_token=attempt_token,
             )
         except Exception as exc:
             new_payloads = []
@@ -1280,7 +1283,15 @@ def _render_personalised_section(
         cache_hits = max(0, int(after_cache.get("hits", 0)) - int(before_cache.get("hits", 0)))
         new_payloads, _invalid_new = filter_recommendation_payloads(new_payloads, rules)
 
-        if new_payloads:
+        target_count = 24 if scan_mode == "Deep" else 18
+        base_minimum = 12 if scan_mode == "Deep" else 9
+        minimum_to_replace = max(
+            base_minimum,
+            min(len(old_payloads), target_count),
+        ) if old_payloads else 6
+        save_new_set = len(new_payloads) >= minimum_to_replace
+
+        if save_new_set:
             generated_at = datetime.now().isoformat(timespec="seconds")
             scan_report = dict(new_payloads[0].get("scan_report") or {})
             scan_report["duration_seconds"] = round(duration, 2)
@@ -1336,13 +1347,15 @@ def _render_personalised_section(
             show_saved_messages = False
             if old_payloads:
                 st.warning(
-                    "The providers did not return enough new rule-compliant books. "
-                    "The last valid set is still shown and nothing in your library was changed."
+                    f"This scan produced {len(new_payloads)} usable books, but at least "
+                    f"{minimum_to_replace} were required to replace the saved set. "
+                    "The last valid recommendations remain in place and your library was not changed."
                 )
             else:
                 st.warning(
-                    "The providers did not return enough rule-compliant books this time. "
-                    "Nothing was saved or removed; press Build recommendations again later."
+                    f"This scan produced {len(new_payloads)} usable books. BookVerse needs at least "
+                    f"{minimum_to_replace} before saving a first recommendation set. "
+                    "Nothing was added or removed."
                 )
 
     saved_messages = [

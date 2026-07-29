@@ -695,7 +695,7 @@ class BookSearchService:
     ) -> SearchResponse:
         """Build a precise pool without flooding either catalogue provider."""
         mode = "Deep" if str(scan_mode).casefold() == "deep" else "Fast"
-        google_query_limit = 2
+        google_query_limit = 4 if mode == "Deep" else 3
         openlibrary_query_limit = 1
         search_terms = profile_search_terms(seed, limit=8 if mode == "Deep" else 5)
         profile = profile_book(seed)
@@ -749,6 +749,13 @@ class BookSearchService:
             add_query(seed.title, "Title")
 
         google_queries = [item for item in query_plan if item[1] != "Author"][:google_query_limit]
+        if mode == "Deep" and seed.authors:
+            author_item = (seed.authors[0], "Author")
+            if author_item not in google_queries:
+                if len(google_queries) >= google_query_limit:
+                    google_queries[-1] = author_item
+                else:
+                    google_queries.append(author_item)
 
         def google_job(item: tuple[str, SearchMode]) -> list[Book]:
             query, query_mode = item
@@ -770,7 +777,7 @@ class BookSearchService:
                             messages.append(str(exc))
 
         # Only fall back to Open Library when Google did not produce a healthy pool.
-        minimum_google_pool = 24 if mode == "Deep" else 16
+        minimum_google_pool = 32 if mode == "Deep" else 20
         should_use_openlibrary = not self.google.enabled or len(deduplicate_books(all_books)) < minimum_google_pool
         if should_use_openlibrary:
             for query, query_mode in query_plan[:openlibrary_query_limit]:

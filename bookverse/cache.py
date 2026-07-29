@@ -8,6 +8,7 @@ import streamlit as st
 
 from .api_clients import BookSearchService, RequestBudget, merge_book_records
 from .models import Book
+from .language_utils import book_language_status
 from .persistent_cache import get_cached, set_cached
 from .recommendation_intelligence import (
     book_dna,
@@ -19,7 +20,7 @@ from .recommendation_intelligence import (
     score_breakdown,
     select_diverse_records,
 )
-from .recommender import rank_similar_detailed, rank_smart_results
+from .recommender import profile_search_terms, rank_similar_detailed, rank_smart_results
 from .smart_search import parse_smart_query
 
 SEARCH_TTL = 60 * 60 * 24 * 7
@@ -237,6 +238,157 @@ def _weighted_seed_books(profile_payload: dict, entry_payloads: list[dict], seed
     return unique, saved_uids, saved_identities
 
 
+REPAIRABLE_RULE_REASONS = {
+    "missing a useful description",
+    "not confirmed as English",
+}
+
+
+def _non_repairable_rule_rejections(book: Book, rules: dict[str, Any]) -> list[str]:
+    return [
+        reason for reason in rule_rejections(book, rules)
+        if reason not in REPAIRABLE_RULE_REASONS
+    ]
+
+
+def _work_title_key(value: str) -> str:
+    value = re.sub(
+        r"\b(a novel|a novella|a memoir|stories|the complete edition|large print)\b",
+        "",
+        str(value or ""),
+        flags=re.I,
+    )
+    return _normalise(value)
+
+
+def _same_catalogue_work(left: Book, right: Book) -> bool:
+    left_title = _work_title_key(left.title)
+    right_title = _work_title_key(right.title)
+    if not left_title or not right_title:
+        return False
+    title_match = (
+        left_title == right_title
+        or (len(left_title) >= 7 and left_title in right_title)
+        or (len(right_title) >= 7 and right_title in left_title)
+    )
+    if not title_match:
+        return False
+
+    left_authors = {
+        token
+        for author in left.authors
+        for token in _normalise(author).split()
+        if len(token) >= 3
+    }
+    right_authors = {
+        token
+        for author in right.authors
+        for token in _normalise(author).split()
+        if len(token) >= 3
+    }
+    return not left_authors or not right_authors or bool(left_authors & right_authors)
+
+
+def _repair_recommendation_candidate(
+    book: Book,
+    service: BookSearchService,
+    database_path: str,
+) -> Book:
+    """Repair a promising candidate before strict description/language rules run.
+
+    Exact Google title/author matching is attempted first. Open Library is used only
+    as a final bounded fallback. Successful repairs persist for thirty days.
+    """
+    parts = (
+        _identity(book),
+        book.primary_isbn,
+        "v21.2-candidate-metadata-repair",
+        bool(service.google.enabled),
+    )
+    cached = get_cached(database_path, "recommendation-metadata-repair", *parts)
+    if isinstance(cached, dict) and cached.get("title"):
+        try:
+            return Book.from_dict(cached)
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    candidates: list[Book] = [book]
+    first_author = book.authors[0].strip() if book.authors else ""
+
+    if service.google.enabled:
+        exact_query = f'intitle:"{book.title}"'
+        if first_author:
+            exact_query += f' inauthor:"{first_author}"'
+        try:
+            response = service.search(
+                query=exact_query,
+                mode="Keyword",
+                provider="Google Books",
+                max_results=10,
+                language="en",
+                order_by="relevance",
+                ebook_filter="",
+                page_index=0,
+            )
+            candidates.extend(
+                candidate for candidate in response.books
+                if _same_catalogue_work(book, candidate)
+            )
+        except Exception:
+            pass
+
+    try:
+        merged = merge_book_records(candidates)
+    except Exception:
+        merged = book
+
+    needs_more = len(merged.description.strip()) < 20 or book_language_status(merged) == "unknown"
+    if needs_more:
+        try:
+            response = service.search(
+                query=book.title,
+                mode="Title",
+                provider="Open Library",
+                max_results=12,
+                language="en",
+                order_by="relevance",
+                ebook_filter="",
+                page_index=0,
+            )
+            exact_openlibrary = [
+                candidate for candidate in response.books
+                if _same_catalogue_work(book, candidate)
+            ]
+            if exact_openlibrary:
+                richest = max(
+                    exact_openlibrary,
+                    key=lambda candidate: (
+                        len(candidate.description),
+                        len(candidate.categories),
+                    ),
+                )
+                if len(richest.description.strip()) < 20:
+                    richest = service.openlibrary.enrich_work(richest)
+                candidates.append(richest)
+                merged = merge_book_records(candidates)
+        except Exception:
+            pass
+
+    if (
+        len(merged.description.strip()) >= 20
+        or book_language_status(merged) != "unknown"
+        or len(merged.categories) > len(book.categories)
+    ):
+        set_cached(
+            database_path,
+            "recommendation-metadata-repair",
+            parts,
+            merged.to_dict(),
+            DETAIL_TTL,
+        )
+    return merged
+
+
 @st.cache_data(ttl=60 * 20, show_spinner=False, max_entries=200)
 def cached_personalised(
     profile_payload: dict,
@@ -245,12 +397,13 @@ def cached_personalised(
     open_library_contact: str,
     timeout: int,
     limit: int = 18,
-    engine_version: str = "v21-recommendation-intelligence",
+    engine_version: str = "v21.2-recommendation-recovery",
     refresh_token: int = 0,
     scan_mode: str = "Fast",
     database_path: str = "",
     feedback_payload: list[dict] | None = None,
     rules_payload: dict[str, Any] | None = None,
+    attempt_token: int = 0,
 ) -> tuple[list[dict], list[str]]:
     mode = "Deep" if str(scan_mode).casefold() == "deep" else "Fast"
     seed_limit = 5 if mode == "Deep" else 3
@@ -262,13 +415,14 @@ def cached_personalised(
         entry_payloads,
         bool(google_api_key),
         refresh_token,
+        attempt_token,
         mode,
         feedback_payload,
         rules,
         engine_version,
     )
     cached = get_cached(database_path, "personalised", *parts)
-    if isinstance(cached, dict):
+    if isinstance(cached, dict) and cached.get("books"):
         return list(cached.get("books") or []), list(cached.get("messages") or [])
 
     weighted_seeds, saved_uids, saved_identities = _weighted_seed_books(
@@ -310,11 +464,19 @@ def cached_personalised(
         }
     }
 
-    # One shared budget applies to every worker in the scan. The provider clients
-    # refuse further requests once the cap is reached and rank what is already held.
-    request_budget = RequestBudget(
-        max_google=30 if mode == "Deep" else 18,
-        max_openlibrary=4 if mode == "Deep" else 2,
+    # Separate budgets stop seed preparation and description repair from consuming
+    # all requests before the actual recommendation searches have run.
+    seed_budget = RequestBudget(
+        max_google=7 if mode == "Deep" else 4,
+        max_openlibrary=0,
+    )
+    search_budget = RequestBudget(
+        max_google=28 if mode == "Deep" else 16,
+        max_openlibrary=2 if mode == "Deep" else 1,
+    )
+    repair_budget = RequestBudget(
+        max_google=14 if mode == "Deep" else 8,
+        max_openlibrary=1,
     )
 
     scan_stats: dict[str, int] = {
@@ -325,7 +487,20 @@ def cached_personalised(
         "rule_filtered": 0,
         "weak_match_removed": 0,
         "aggregate_candidates": 0,
+        "expansion_queries": 0,
+        "metadata_repairs_attempted": 0,
+        "metadata_repairs_successful": 0,
     }
+
+    def has_defensible_match(seed: Book, result: Any) -> bool:
+        evidence = recommendation_evidence_strength(seed, result.book)
+        score = float(result.score)
+        percent = int(result.match_percent)
+        return (
+            (evidence >= 4 and score >= 0.075)
+            or (evidence >= 2 and percent >= 54 and score >= 0.085)
+            or (evidence >= 1 and percent >= 58 and score >= 0.11)
+        )
 
     def scan_seed(item: tuple[float, Book]) -> tuple[float, Book, list[Any], list[str]]:
         weight, seed = item
@@ -334,7 +509,7 @@ def cached_personalised(
             seed.to_dict(),
             mode,
             bool(google_api_key),
-            "v21.1-seed-candidate-pool",
+            "v21.2-seed-candidate-pool",
         )
         cached_pool = get_cached(database_path, "recommendation-seed-pool", *seed_cache_parts)
         provider_messages: list[str] = []
@@ -346,45 +521,42 @@ def cached_personalised(
                 for payload in cached_pool.get("candidates") or []
             ]
         else:
-            service = BookSearchService(
+            seed_service = BookSearchService(
                 google_api_key,
                 open_library_contact,
                 timeout,
-                request_budget=request_budget,
+                request_budget=seed_budget,
+            )
+            search_service = BookSearchService(
+                google_api_key,
+                open_library_contact,
+                timeout,
+                request_budget=search_budget,
             )
             try:
-                enriched_seed = service.prepare_recommendation_seed(seed, scan_mode=mode)
+                enriched_seed = seed_service.prepare_recommendation_seed(seed, scan_mode=mode)
             except TypeError:
-                enriched_seed = service.prepare_recommendation_seed(seed)
+                enriched_seed = seed_service.prepare_recommendation_seed(seed)
+            except Exception:
+                enriched_seed = seed
             try:
-                response = service.recommendation_candidates(
-                    enriched_seed,
-                    max_results=80 if mode == "Deep" else 50,
-                    scan_mode=mode,
-                )
-            except TypeError:
-                response = service.recommendation_candidates(
-                    enriched_seed,
-                    max_results=80 if mode == "Deep" else 50,
-                )
-            provider_messages = list(response.provider_messages)
-            try:
-                candidates = service.enrich_recommendation_candidates(
-                    enriched_seed,
-                    response.books,
-                    limit=3 if mode == "Deep" else 1,
-                    parallel=True,
-                )
-            except TypeError:
-                candidates = service.enrich_recommendation_candidates(
-                    enriched_seed,
-                    response.books,
-                    limit=3 if mode == "Deep" else 1,
-                )
+                try:
+                    response = search_service.recommendation_candidates(
+                        enriched_seed,
+                        max_results=120 if mode == "Deep" else 70,
+                        scan_mode=mode,
+                    )
+                except TypeError:
+                    response = search_service.recommendation_candidates(
+                        enriched_seed,
+                        max_results=120 if mode == "Deep" else 70,
+                    )
+                candidates = list(response.books)
+                provider_messages = list(response.provider_messages)
+            except Exception as exc:
+                candidates = []
+                provider_messages = [str(exc)]
 
-            # Never cache an outage as an empty candidate pool. A successful pool is
-            # reusable for seven days, so repeat refreshes rerank locally instead of
-            # hitting both providers again.
             if candidates:
                 set_cached(
                     database_path,
@@ -400,21 +572,79 @@ def cached_personalised(
         ranked = rank_similar_detailed(
             enriched_seed,
             candidates,
-            limit=18 if mode == "Deep" else 12,
+            limit=30 if mode == "Deep" else 20,
         )
-        return weight, seed, ranked, provider_messages
+        return weight, enriched_seed, ranked, provider_messages
 
     aggregates: dict[str, dict[str, Any]] = {}
     messages: list[str] = []
 
-    def has_defensible_match(seed: Book, result: Any) -> bool:
-        evidence = recommendation_evidence_strength(seed, result.book)
-        score = float(result.score)
-        percent = int(result.match_percent)
-        return (
-            (percent >= 58 and score >= 0.12 and evidence >= 2)
-            or (percent >= 54 and score >= 0.10 and evidence >= 4)
-        )
+    def add_ranked_candidate(
+        seed_weight: float,
+        seed: Book,
+        result: Any,
+        reason_prefix: str = "",
+    ) -> None:
+        scan_stats["candidate_rows"] += 1
+        book = result.book
+        if not has_defensible_match(seed, result):
+            scan_stats["weak_match_removed"] += 1
+            return
+        identity = _identity(book)
+        if book.uid in saved_uids or identity in saved_identities:
+            scan_stats["saved_or_duplicate_removed"] += 1
+            return
+        if book.uid in negative_uids or identity in negative_identities:
+            scan_stats["feedback_removed"] += 1
+            return
+        author_key = _normalise(book.author_text)
+        if author_key and author_key in hidden_authors:
+            scan_stats["hidden_author_removed"] += 1
+            return
+        if _non_repairable_rule_rejections(book, rules):
+            scan_stats["rule_filtered"] += 1
+            return
+
+        record = aggregates.get(identity)
+        if record is None:
+            record = {
+                "book": book,
+                "score": 0.0,
+                "best_percent": 0,
+                "best_label": "Possible match",
+                "reasons": [],
+                "seed_count": 0,
+                "matched_seed_uids": [],
+                "preference_points": 0.0,
+            }
+            aggregates[identity] = record
+        else:
+            try:
+                record["book"] = merge_book_records([record["book"], book])
+            except Exception:
+                pass
+
+        multiplier = 1.0 + min(seed_weight, 12.0) * 0.08
+        if author_key and author_key in liked_authors:
+            multiplier += 0.18
+            record["preference_points"] += 4.0
+        feedback_multiplier, feedback_notes = feedback_adjustment(book, preference_signals)
+        multiplier *= feedback_multiplier
+        record["preference_points"] += (feedback_multiplier - 1.0) * 20.0
+        record["score"] += float(result.score) * multiplier
+        if seed.uid not in record["matched_seed_uids"]:
+            record["matched_seed_uids"].append(seed.uid)
+            record["seed_count"] += 1
+        if int(result.match_percent) > int(record["best_percent"]):
+            record["best_percent"] = int(result.match_percent)
+            record["best_label"] = str(result.match_label)
+        for reason in [
+            reason_prefix or f"because you liked {seed.display_title}",
+            *list(result.reasons),
+            *feedback_notes,
+        ]:
+            if reason and reason not in record["reasons"]:
+                record["reasons"].append(reason)
 
     workers = min(3 if mode == "Deep" else 2, len(weighted_seeds))
     with ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="bookverse-seed") as executor:
@@ -427,178 +657,217 @@ def cached_personalised(
                 continue
             messages.extend(provider_messages)
             for result in ranked:
-                scan_stats["candidate_rows"] += 1
-                book = result.book
-                if not has_defensible_match(seed, result):
-                    scan_stats["weak_match_removed"] += 1
-                    continue
-                identity = _identity(book)
-                if book.uid in saved_uids or identity in saved_identities:
-                    scan_stats["saved_or_duplicate_removed"] += 1
-                    continue
-                if book.uid in negative_uids or identity in negative_identities:
-                    scan_stats["feedback_removed"] += 1
-                    continue
-                author_key = _normalise(book.author_text)
-                if author_key and author_key in hidden_authors:
-                    scan_stats["hidden_author_removed"] += 1
-                    continue
-                rejections = rule_rejections(book, rules)
-                if rejections:
-                    scan_stats["rule_filtered"] += 1
-                    continue
+                add_ranked_candidate(seed_weight, seed, result)
 
-                record = aggregates.setdefault(
-                    book.uid,
-                    {
-                        "book": book,
-                        "score": 0.0,
-                        "best_percent": 0,
-                        "best_label": "Possible match",
-                        "reasons": [],
-                        "seed_count": 0,
-                        "preference_points": 0.0,
-                    },
-                )
-                multiplier = 1.0 + min(seed_weight, 12.0) * 0.08
-                if author_key and author_key in liked_authors:
-                    multiplier += 0.18
-                    record["preference_points"] += 4.0
-                feedback_multiplier, feedback_notes = feedback_adjustment(book, preference_signals)
-                multiplier *= feedback_multiplier
-                record["preference_points"] += (feedback_multiplier - 1.0) * 20.0
-                record["score"] += float(result.score) * multiplier
-                record["seed_count"] += 1
-                if int(result.match_percent) > int(record["best_percent"]):
-                    record["best_percent"] = int(result.match_percent)
-                    record["best_label"] = str(result.match_label)
-                for reason in [
-                    f"because you liked {seed.display_title}",
-                    *list(result.reasons),
-                    *feedback_notes,
-                ]:
-                    if reason and reason not in record["reasons"]:
-                        record["reasons"].append(reason)
+    # A second, profile-wide stage widens the search only when the seed pools are
+    # not large enough. It derives specific queries from the saved books rather
+    # than relying on broad terms such as "fiction" or "dark" alone.
+    generic_expansion_terms = {
+        "fiction", "nonfiction", "general", "novel", "stories", "adult",
+        "book", "literature", "dark", "mature", "suspenseful",
+    }
+    expansion_plan: list[tuple[str, str]] = []
+    expansion_seen: set[tuple[str, str]] = set()
 
-    # A small profile-niche fallback runs only when seed scans did not produce a
-    # healthy pool. Every niche result must still prove a match to a real seed.
-    niches = [
-        str(value).strip()
-        for value in profile_payload.get("favourite_niches") or []
-        if str(value).strip()
-    ]
-    niche_limit = 2 if mode == "Deep" else 1
+    def add_expansion(query: str, query_mode: str = "Keyword") -> None:
+        query = " ".join(str(query or "").split()).strip()
+        key = (query.casefold(), query_mode)
+        if query and key not in expansion_seen:
+            expansion_seen.add(key)
+            expansion_plan.append((query, query_mode))
 
-    def scan_niche(niche: str) -> tuple[str, list[Book], list[str]]:
+    for _weight, seed in weighted_seeds:
+        terms = [
+            term for term in profile_search_terms(seed, limit=8)
+            if _normalise(term) not in generic_expansion_terms
+            and len(_normalise(term)) >= 4
+        ]
+        if len(terms) >= 2:
+            add_expansion(f"{terms[0]} {terms[1]} novel")
+        if terms:
+            add_expansion(terms[0], "Genre / subject")
+
+    for niche in profile_payload.get("favourite_niches") or []:
+        niche = str(niche).strip()
+        if niche and _normalise(niche) not in generic_expansion_terms:
+            add_expansion(f"{niche} novel")
+
+    expansion_limit = 8 if mode == "Deep" else 4
+
+    def scan_expansion(item: tuple[str, str]) -> tuple[list[Book], list[str]]:
+        query, query_mode = item
+        cache_parts = (
+            query,
+            query_mode,
+            mode,
+            bool(google_api_key),
+            "v21.2-profile-expansion-pool",
+        )
+        cached_pool = get_cached(database_path, "recommendation-expansion-pool", *cache_parts)
+        if isinstance(cached_pool, dict) and cached_pool.get("books"):
+            return (
+                [Book.from_dict(payload) for payload in cached_pool.get("books") or []],
+                [],
+            )
         service = BookSearchService(
             google_api_key,
             open_library_contact,
             timeout,
-            request_budget=request_budget,
+            request_budget=search_budget,
         )
         response = service.search(
-            query=niche,
-            mode="Genre / subject",
+            query=query,
+            mode=query_mode,  # type: ignore[arg-type]
             provider="Auto",
-            max_results=18 if mode == "Deep" else 12,
+            max_results=20,
             language="en",
             order_by="relevance",
             ebook_filter="",
-            page_index=refresh_token % 4,
+            # The old engine used page_index=refresh_token % 4. The recovery
+            # engine keeps expansion on page zero so every attempt starts with
+            # the strongest catalogue results; attempt_token still bypasses a
+            # previously failed cache entry.
+            page_index=0,
         )
-        return niche, response.books, response.provider_messages
+        if response.books:
+            set_cached(
+                database_path,
+                "recommendation-expansion-pool",
+                cache_parts,
+                {"books": [book.to_dict() for book in response.books]},
+                SEED_POOL_TTL,
+            )
+        return list(response.books), list(response.provider_messages)
 
-    if len(aggregates) < final_limit * 2 and niches:
-        with ThreadPoolExecutor(max_workers=min(2, niche_limit), thread_name_prefix="bookverse-niche") as executor:
-            futures = [executor.submit(scan_niche, niche) for niche in niches[:niche_limit]]
-            for future in as_completed(futures):
+    if len(aggregates) < final_limit * 3 and expansion_plan:
+        selected_expansions = expansion_plan[:expansion_limit]
+        scan_stats["expansion_queries"] = len(selected_expansions)
+        with ThreadPoolExecutor(max_workers=min(3, len(selected_expansions)), thread_name_prefix="bookverse-expand") as executor:
+            future_map = {
+                executor.submit(scan_expansion, item): item
+                for item in selected_expansions
+            }
+            for future in as_completed(future_map):
+                query, _query_mode = future_map[future]
                 try:
-                    niche, books, provider_messages = future.result()
-                except Exception:
+                    books, provider_messages = future.result()
+                except Exception as exc:
+                    messages.append(str(exc))
                     continue
                 messages.extend(provider_messages)
                 for book in books:
-                    scan_stats["candidate_rows"] += 1
-                    identity = _identity(book)
-                    if book.uid in saved_uids or identity in saved_identities:
-                        scan_stats["saved_or_duplicate_removed"] += 1
-                        continue
-                    if book.uid in negative_uids or identity in negative_identities:
-                        scan_stats["feedback_removed"] += 1
-                        continue
-                    author_key = _normalise(book.author_text)
-                    if author_key and author_key in hidden_authors:
-                        scan_stats["hidden_author_removed"] += 1
-                        continue
-                    if rule_rejections(book, rules):
-                        scan_stats["rule_filtered"] += 1
-                        continue
-
-                    best_result = None
-                    best_seed = None
-                    for _seed_weight, seed_book in weighted_seeds:
-                        ranked_one = rank_similar_detailed(seed_book, [book], limit=1)
-                        if ranked_one and (
-                            best_result is None
-                            or float(ranked_one[0].score) > float(best_result.score)
-                        ):
-                            best_result = ranked_one[0]
-                            best_seed = seed_book
-                    if (
-                        best_result is None
-                        or best_seed is None
-                        or not has_defensible_match(best_seed, best_result)
-                    ):
-                        scan_stats["weak_match_removed"] += 1
-                        continue
-
-                    record = aggregates.setdefault(
-                        book.uid,
-                        {
-                            "book": book,
-                            "score": 0.0,
-                            "best_percent": int(best_result.match_percent),
-                            "best_label": str(best_result.match_label),
-                            "reasons": [],
-                            "seed_count": 0,
-                            "preference_points": 0.0,
-                        },
-                    )
-                    multiplier, feedback_notes = feedback_adjustment(book, preference_signals)
-                    if author_key in liked_authors:
-                        multiplier += 0.15
-                        record["preference_points"] += 3.0
-                    record["preference_points"] += (multiplier - 1.0) * 20.0
-                    record["score"] += float(best_result.score) * multiplier
-                    record["seed_count"] += 1
-                    record["best_percent"] = max(int(record["best_percent"]), int(best_result.match_percent))
-                    for reason in [
-                        f"matches your {niche} preference",
-                        *list(best_result.reasons),
-                        *feedback_notes,
-                    ]:
-                        if reason and reason not in record["reasons"]:
-                            record["reasons"].append(reason)
+                    best: tuple[float, Book, Any] | None = None
+                    for seed_weight, seed in weighted_seeds:
+                        ranked_one = rank_similar_detailed(seed, [book], limit=1)
+                        if not ranked_one:
+                            continue
+                        result = ranked_one[0]
+                        if best is None or float(result.score) > float(best[2].score):
+                            best = (seed_weight, seed, result)
+                    if best is not None:
+                        add_ranked_candidate(
+                            best[0],
+                            best[1],
+                            best[2],
+                            reason_prefix=f"found through {query}",
+                        )
 
     scan_stats["aggregate_candidates"] = len(aggregates)
-    ranked_records = list(aggregates.values())
-    for record in ranked_records:
+
+    # Repair only the strongest promising candidates, then enforce every active rule.
+    provisional = list(aggregates.values())
+    for record in provisional:
         book = record["book"]
-        record["rank_score"] = (
+        record["pre_rank"] = (
             int(record["best_percent"]) * 2.0
             + int(record["seed_count"]) * 12.0
             + float(record["score"]) * 18.0
             + (8.0 if book.description else 0.0)
             + min(int(book.ratings_count or 0), 1000) / 250.0
         )
-    ranked_records.sort(key=lambda record: float(record["rank_score"]), reverse=True)
-    if ranked_records and refresh_token:
-        bucket = ranked_records
-        shift = (max(0, int(refresh_token)) * 2) % len(bucket)
-        ranked_records = bucket[shift:] + bucket[:shift]
-    selected_records, diversity_stats = select_diverse_records(ranked_records, final_limit, rules)
+    provisional.sort(key=lambda record: float(record["pre_rank"]), reverse=True)
 
-    budget_stats = request_budget.snapshot()
+    repair_limit = min(len(provisional), 40 if mode == "Deep" else 24)
+    repair_targets = [
+        record for record in provisional[:repair_limit]
+        if any(reason in REPAIRABLE_RULE_REASONS for reason in rule_rejections(record["book"], rules))
+    ]
+    scan_stats["metadata_repairs_attempted"] = len(repair_targets)
+
+    def repair_record(record: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        original: Book = record["book"]
+        service = BookSearchService(
+            google_api_key,
+            open_library_contact,
+            timeout,
+            request_budget=repair_budget,
+        )
+        repaired = _repair_recommendation_candidate(original, service, database_path)
+        changed = (
+            len(repaired.description) > len(original.description)
+            or book_language_status(repaired) != book_language_status(original)
+            or len(repaired.categories) > len(original.categories)
+        )
+        updated = dict(record)
+        updated["book"] = repaired
+        return updated, changed
+
+    repaired_by_identity: dict[str, dict[str, Any]] = {}
+    if repair_targets:
+        with ThreadPoolExecutor(max_workers=min(3, len(repair_targets)), thread_name_prefix="bookverse-repair") as executor:
+            future_map = {
+                executor.submit(repair_record, record): _identity(record["book"])
+                for record in repair_targets
+            }
+            for future in as_completed(future_map):
+                identity = future_map[future]
+                try:
+                    repaired_record, changed = future.result()
+                except Exception:
+                    continue
+                repaired_by_identity[identity] = repaired_record
+                if changed:
+                    scan_stats["metadata_repairs_successful"] += 1
+
+    final_records: list[dict[str, Any]] = []
+    for record in provisional:
+        identity = _identity(record["book"])
+        record = repaired_by_identity.get(identity, record)
+        book = record["book"]
+        rejections = rule_rejections(book, rules)
+        if rejections:
+            scan_stats["rule_filtered"] += 1
+            continue
+        record["rank_score"] = (
+            int(record["best_percent"]) * 2.0
+            + int(record["seed_count"]) * 12.0
+            + float(record["score"]) * 18.0
+            + (10.0 if len(book.description) >= 120 else 6.0)
+            + min(int(book.ratings_count or 0), 1000) / 250.0
+        )
+        final_records.append(record)
+
+    final_records.sort(key=lambda record: float(record["rank_score"]), reverse=True)
+    # Legacy rotation formula retained for compatibility and auditability:
+    # shift = (max(0, int(refresh_token)) * 2) % len(bucket)
+    if final_records and refresh_token:
+        safe_head = final_records[: max(final_limit, 12)]
+        tail = final_records[max(final_limit, 12):]
+        if tail:
+            shift = (max(0, int(refresh_token)) * 2) % len(tail)
+            final_records = safe_head + tail[shift:] + tail[:shift]
+
+    selected_records, diversity_stats = select_diverse_records(final_records, final_limit, rules)
+
+    snapshots = [seed_budget.snapshot(), search_budget.snapshot(), repair_budget.snapshot()]
+    budget_stats: dict[str, int] = {}
+    for key in (
+        "google_attempts", "google_successes", "google_errors", "google_denied",
+        "openlibrary_attempts", "openlibrary_successes", "openlibrary_errors", "openlibrary_denied",
+        "google_budget", "openlibrary_budget",
+    ):
+        budget_stats[key] = sum(int(snapshot.get(key, 0)) for snapshot in snapshots)
+
     scan_report = {
         **scan_stats,
         **diversity_stats,
@@ -635,39 +904,33 @@ def cached_personalised(
         )
 
     unique_messages = list(dict.fromkeys(message for message in messages if message))
-    messages = []
-    openlibrary_problem = any(
-        "Open Library" in message
-        and "budget reached" not in message.casefold()
-        for message in unique_messages
-    )
-    google_problem = any(
-        "Google Books" in message
-        and "budget reached" not in message.casefold()
-        for message in unique_messages
-    )
-    if openlibrary_problem:
-        messages.append(
-            "Open Library was temporarily limited. BookVerse continued with Google Books and saved seed pools."
+    condensed: list[str] = []
+    if any("Open Library" in message for message in unique_messages):
+        condensed.append(
+            "Open Library was limited during part of the scan. Google Books and saved candidate pools completed the remaining work."
         )
-    if google_problem:
-        messages.append(
-            "One or more Google Books searches failed, but completed searches and saved seed pools were still ranked."
+    if any("Google Books" in message for message in unique_messages):
+        condensed.append(
+            "Some Google Books requests did not complete, but other searches and saved candidate pools were still ranked."
         )
-    messages.extend(
+    condensed.extend(
         message for message in unique_messages
         if "Open Library" not in message
         and "Google Books" not in message
         and "budget reached" not in message.casefold()
     )
-    messages = messages[:2]
-    set_cached(
-        database_path,
-        "personalised",
-        parts,
-        {"books": payloads, "messages": messages},
-        RECOMMENDATION_TTL,
-    )
+    messages = list(dict.fromkeys(condensed))[:2]
+
+    # Never persist an empty outage result. Failed attempts must be allowed to run
+    # again immediately instead of replaying an empty cache for seven days.
+    if payloads:
+        set_cached(
+            database_path,
+            "personalised",
+            parts,
+            {"books": payloads, "messages": messages},
+            RECOMMENDATION_TTL,
+        )
     return payloads, messages
 
 
